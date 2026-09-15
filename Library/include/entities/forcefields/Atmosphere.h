@@ -29,6 +29,9 @@
 #include "core/MaterialManager.h"
 #include "entities/ForcefieldEntity.h"
 #include "graphics/OpenGLDataStructs.h"
+#include "graphics/OpenGLAtmosphere.h"
+#include "actuators/Thruster.h"
+
 
 namespace sf
 {
@@ -71,13 +74,21 @@ namespace sf
          */
         void SetSunPosition(Scalar azimuthDeg, Scalar elevationDeg);
 
+        //! NEW: A method used to set the fog parameters.
+        /*!
+         \param density the fog density [0-1]
+         \param color the fog color (RGB)
+        */
+        void SetFog(Scalar density, Vector3 color);
+
         //! A method used to set the atmospheric conditions.
         /*!
          \param temperature the air temperature at sea level [degC]
          \param pressure the air pressure at sea level [Pa]
          \param humidity the air relative humidity at sea level [0-1]
+         \param density NEW: the air density (1.255 usually)
          */
-        void SetConditions(Scalar temperature, Scalar pressure, Scalar humidity);
+        void SetConditions(Scalar temperature, Scalar pressure, Scalar humidity, Scalar density);
         
         //! A method used to add a velocity field to the atmosphere.
         /*!
@@ -105,6 +116,13 @@ namespace sf
          \return sun directional vector
          */
         Vector3 GetSunDirection() const;
+
+        //! NEW: A method returning Pressure at point.
+        /*!
+         \param point the point in the atmosphere where the pressure should be measured [m]
+         \return air pressure at specified point [Pa]
+         */
+        Scalar GetPressure(const Vector3& point);
 
         //! A method returning the air velocity.
         /*!
@@ -135,11 +153,34 @@ namespace sf
          \param tm a reference to a structure containing UTC time
          */
         static int JulianDay(std::tm& tm);
-        
+
+        //! NEW: Enable currents like Ocean.
+        void EnableCurrents();
+
+        //! NEW: Disable currents like Ocean.
+        void DisableCurrents();
+
+        //! NEW: method to update the currents data in the OpenGLAtmosphere object.
+        void UpdateCurrentsData();
+
+        //! NEW: Copy of render method from ocean for glyphs and other visualizations.
+        std::vector<Renderable> Render();
+        std::vector<Renderable> Render(const std::vector<Actuator*>& act);
+
+        //! NEW: A method used to get a velocity field from the atmosphere.
+        VelocityField* getVelocityField(unsigned int index);
+
+        //! NEW: A method returning a pointer to all velocity fields.
+        std::vector<VelocityField*> getVelocityFields();     
+                   
     private:
         Fluid gas;
         std::vector<VelocityField*> wind;
         OpenGLAtmosphere* glAtmosphere;
+
+        Scalar AtmPressure; // NEW: Pressure at sea level [Pa]
+        bool windEnabled;   // NEW: Flag to enable/disable wind currents
+        AirCurrentsUBO glAirCurrentsUBOData; // NEW: Uniform buffer object for air currents data
     };
 }
 

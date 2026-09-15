@@ -17,28 +17,15 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-#version 330
 
-uniform ivec3 gridOrigin;
-uniform ivec3 gridSize;
-uniform float gridScale;
+#version 430
+
+layout(std140) buffer Positions
+{
+    vec4 posSize[];
+};
 
 void main()
 {
-    ivec3 point;
-
-    if(gl_VertexID == 0)
-    {
-        point.x = 0;
-        point.y = 0;
-        point.z = 0;
-    }
-    else
-    {
-        point.x = gl_VertexID/(gridSize.y*gridSize.z); 
-        point.y = gl_VertexID/gridSize.z - point.x*gridSize.y;
-        point.z = gl_VertexID - (point.x*gridSize.y + point.y)*gridSize.z;        
-    }
-
-    gl_Position = vec4((point + gridOrigin) * gridScale, 1.f); //world position
+    gl_Position = vec4(posSize[gl_VertexID].xyz, 1.f); //world position from particle buffer
 }

@@ -1,0 +1,65 @@
+#version 430
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+uniform float dt;
+uniform uint numParticles;
+uniform vec3 eyePos;
+uniform float R;
+uniform sampler3D fieldTex;
+uniform vec3 fieldBoxMin;
+uniform vec3 fieldBoxSize;
+
+vec3 sampleFieldTex(vec3 p)
+{
+    vec3 tc = (p - fieldBoxMin) / fieldBoxSize;   //world -> [0,1] texcoord
+    return texture(fieldTex, tc).xyz;             //trilinear; .w holds |v| if you want it
+}
+
+layout(std140) buffer Positions
+{
+    vec4 posSize[];
+};
+
+#inject "oceanVelocityField.glsl"
+
+//Hash-based pseudo-random vec3 in [0,1] (used only for respawn scatter, not physics)
+vec3 hash3(vec3 p)
+{
+    p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.xxy + p.yxx) * p.zyx);
+}
+
+void main()
+{
+    uint pid = gl_GlobalInvocationID.x;
+    if(pid < numParticles)
+    {
+        vec3 p = posSize[pid].xyz;
+
+        //Pure advection: move the tracer by the TRUE field velocity at its location.
+        //sampleVelocityField() is the same function the .geom uses to draw the arrow,
+        //so the motion and the drawn vector always agree.
+        vec3 v = sampleFieldTex(p);
+        p += v * dt;
+
+        //Age the tracer (housekeeping, not physics): w holds age in seconds
+        float age = posSize[pid].w + dt;
+
+        //Recycle on either leaving the view sphere OR exceeding its lifetime,
+        //so tracers stuck in dead zones still get redistributed.
+        const float maxAge = 4.0;   //seconds a tracer lives before reseeding
+        float d = distance(eyePos, p);
+        if(d > R || age > maxAge)
+        {
+            vec3 rnd = hash3(p * 1000.0 + vec3(dt));
+            p = eyePos + (rnd * 2.0 - 1.0) * R;
+            if(p.z < 0.0) p.z = -p.z;     //OCEAN half-space
+            age = 0.0;
+        }
+
+        posSize[pid].xyz = p;
+        posSize[pid].w = age;             //write age back
+    }
+}

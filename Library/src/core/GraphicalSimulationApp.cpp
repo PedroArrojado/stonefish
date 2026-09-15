@@ -27,6 +27,7 @@
 
 #include <chrono>
 #include <thread>
+#include <omp.h>
 #include "core/SimulationManager.h"
 #include "core/Robot.h"
 #include "graphics/OpenGLState.h"
@@ -565,6 +566,7 @@ void GraphicalSimulationApp::LoopInternal()
         }
     }
 
+    // NEW: I dont remember what this was for, but i think it was fixing a segfault.
     if(joystick != nullptr)
     {
         for(int i=0; i<SDL_JoystickNumAxes(joystick); i++)
@@ -572,6 +574,25 @@ void GraphicalSimulationApp::LoopInternal()
     
         for(int i=0; i<SDL_JoystickNumHats(joystick); i++)
             joystickHats[i] = SDL_JoystickGetHat(joystick, i);
+    }
+
+        if(getSimulationManager()->HasPendingStructuralChanges())
+    {
+        bool simRunning = (state_ == SimulationState::RUNNING) && (simulationThread != nullptr);
+        if(!simRunning)
+            getSimulationManager()->ApplyStructuralChanges();
+        else
+        {
+            std::unique_lock<std::mutex> lk(pauseMutex_);
+            structuralPauseRequested_.store(true);
+            pauseCv_.wait(lk, [&]{
+                return simParked_.load() || state_ != SimulationState::RUNNING; });
+            if(simParked_.load())
+                getSimulationManager()->ApplyStructuralChanges();
+            structuralPauseRequested_.store(false);
+            lk.unlock();
+            pauseCv_.notify_all();
+        }
     }
     
     ProcessInputs();
@@ -678,6 +699,7 @@ void GraphicalSimulationApp::DoHUD()
     //Helper settings
     HelperSettings& hs = getHelperSettings();
     Ocean* ocn = getSimulationManager()->getOcean();
+    Atmosphere* atm = getSimulationManager()->getAtmosphere(); // NEW: Get atmosphere pointer for GUI
     
     GLfloat offset = 10.f;
     gui->DoPanel(10.f, offset, 160.f, ocn != nullptr ? 226.f : 159.f);
@@ -726,6 +748,13 @@ void GraphicalSimulationApp::DoHUD()
 
         id.item = 8;
         hs.showOceanVelocityField = gui->DoCheckBox(id, 15.f, offset, 110.f, hs.showOceanVelocityField, "Water velocity");
+        offset += 22.f;
+    }
+
+    if(atm != nullptr) // NEW: Add GUI option for atmosphere velocity field
+    {
+        id.item = 9;
+        hs.showAtmosphereVelocityField = gui->DoCheckBox(id, 15.f, offset, 110.f, hs.showAtmosphereVelocityField, "Air velocity");
         offset += 22.f;
     }
     

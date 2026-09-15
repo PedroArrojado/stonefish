@@ -32,7 +32,7 @@ namespace sf
 {
     //! An enum defining types of vision sensors.
     enum class VisionSensorType {COLOR_CAMERA, DEPTH_CAMERA, THERMAL_CAMERA, EVENT_BASED_CAMERA, 
-                                    OPTICAL_FLOW_CAMERA, SEGMENTATION_CAMERA, MULTIBEAM2, FLS, SSS, MSIS};
+                                    OPTICAL_FLOW_CAMERA, SEGMENTATION_CAMERA, MULTIBEAM2, FLS, SSS, MSIS, LIDAR};
     
     class Entity;
     class StaticEntity;
@@ -106,6 +106,9 @@ namespace sf
 
         //! A method returning a pointer to the underlaying OpenGLView object.
         virtual OpenGLView* getOpenGLView() const = 0;
+
+        //! TODO: Remove sensor from graphics (OpenGLView) when sensor is removed from simulation
+        virtual void RemoveFromGraphics() {};
         
     protected:
         virtual void InitGraphics(bool& seesParticles) = 0;

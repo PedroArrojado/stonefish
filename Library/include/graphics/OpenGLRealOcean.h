@@ -28,6 +28,7 @@
 
 #include "graphics/OpenGLOcean.h"
 #include <SDL2/SDL_mutex.h>
+#include <functional>
 
 namespace sf
 {
@@ -49,12 +50,32 @@ namespace sf
         /*!
          \param size the size of the ocean surface mesh [m]
          \param state the state of the ocean, if >0 the ocean is rendered with geometric waves otherwise as a plane with wave texture
+         
+         NEW:param based construction
+         \param oceanType the type of ocean construction, either "params" or "sea_state" (original constructor)
+         \param eckvWindSpeed the speed of the wind [m/s] U10 in ECKV see paper
+         \param eckvDirection the direction of the wind [rad] (half plane mask direction) see paper
+         \param eckvAge the age of the wind [s] U10 in ECKV see paper
+         
+         Original mutex pass
          \param hydrodynamics a pointer to a mutex
          */
-        OpenGLRealOcean(GLfloat size, GLfloat state, SDL_mutex* hydrodynamics);
+        OpenGLRealOcean(GLfloat size, GLfloat state, std::string oceanType,
+            GLfloat eckvWindSpeed, GLfloat eckvDirection, GLfloat eckvAge, 
+            SDL_mutex* hydrodynamics);
         
         //! A destructor.
         ~OpenGLRealOcean();
+        
+        // NEW: For mutex access
+        SDL_mutex* getHydroMutex();
+        
+        /*! 
+         NEW: Setup a callback function to be called when ocean parameters are updated.
+         This is used to apply the pending ocean update in the next render call.
+         \param cb a callback function to be called when ocean parameters are updated
+        */
+        void setUpdateCallback(std::function<void()> cb) { updateCallback_ = cb;}
 
         //! A method that simulates wave propagation.
 		/*!
@@ -106,6 +127,13 @@ namespace sf
          */
         GLfloat ComputeWaveHeight(GLfloat x, GLfloat y) override;
 
+        //! A method to get wave height at a batch of coordinates.
+        /*!
+         \param pts a vector of points in world frame [m]
+         \return a vector of wave heights [m]
+         */
+        virtual std::vector<float> ComputeWaveHeightMap(const std::vector<glm::vec3>& pts) override;
+
         //! A method do enable wireframe rendering.
         /*!
          \param enabled a flag to indicating if wireframe should be enabled
@@ -126,6 +154,9 @@ namespace sf
         GLint qtGPUTessFactor;
         GLint qtPatchIndexCount;
         bool wireframe;
+        
+        // NEW: Callback function to be called when ocean parameters are updated
+        std::function<void()> updateCallback_;
     };
 }
 

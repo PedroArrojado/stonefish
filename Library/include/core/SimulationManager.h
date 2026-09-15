@@ -32,6 +32,7 @@
 #include "entities/SolidEntity.h"
 #include "utils/PerformanceMonitor.h"
 #include "BulletSoftBody/btSoftMultiBodyDynamicsWorld.h"
+#include "core/FeatherstoneRobot.h"
 
 namespace sf
 {
@@ -51,6 +52,7 @@ namespace sf
     class Contact;
     class OpenGLTrackball;
     class OpenGLDebugDrawer;
+    class VelocityField;
     
     //! An enum designating the type of solver used for physics computation
     enum class Solver {SI, DANTZIG, PGS, LEMKE, NNCG};
@@ -82,6 +84,18 @@ namespace sf
         
         //! A destructor.
         virtual ~SimulationManager();
+
+        //! NEW: Method to get the entity list
+        std::vector<Entity*> getEntities();
+
+        //! NEW: Method to remove entity from the entity list
+        /*!
+         \param entity pointer of entity to be removed
+        */
+        void removeEntityFromList(Entity* entity);
+        
+        //! NEW: Method to get the entity mutex
+        SDL_mutex* getEntitiesMutex() const;
         
         //! A method used to construct simulation scenario. This has to be implemented by the subclass.
         virtual void BuildScenario() = 0;
@@ -122,6 +136,9 @@ namespace sf
         //! A method that steps the simulation based on real time.
         void AdvanceSimulation();
 
+        //! A method that returns dt
+        Scalar getStepTime();
+
         //! A method that performs on simulation step of specified period.
         void StepSimulation(Scalar timeStep);
         
@@ -140,6 +157,14 @@ namespace sf
          \param origin a pose of the robot in the world frame
          */
         void AddRobot(Robot* robot, const Transform& origin);
+
+        //! NEW: A method that removes a robot from the simulation world.
+        /*!
+        Currently crashes with seg fault, robot removal is not clean
+        Probably some leftover artifact that is not being destroyed correctly
+         \param ent a pointer to the dynamic body object
+         */
+        bool RemoveRobot(Robot* robot);
         
         //! A method that adds a static body to the simulation world.
         /*!
@@ -148,24 +173,61 @@ namespace sf
          */
         void AddStaticEntity(StaticEntity* ent, const Transform& origin);
         
+        //! NEW: A method that removes a static rigid body from the simulation world.
+        /*!
+         \param ent a pointer to the dynamic body object
+         */
+        void RemoveStaticEntity(StaticEntity* ent);
+
+        //! NEW: A method to respawn a static rigid body at a target origin.
+        /*!
+         \param ent a pointer to the dynamic body object
+         \param origin a pose of the body in the world frame
+        */
+        void RespawnStaticEntity(StaticEntity* ent, Transform origin);
+
         //! A method that adds an animated rigid body to the simulation world.
         /*!
          \param ent a pointer to the animated object
          */
         void AddAnimatedEntity(AnimatedEntity* ent);
+
+        //! NEW: A method that removes a animated rigid body from the simulation world.
+        /*!
+         TODO: Not implemented
+         \param ent a pointer to the dynamic body object
+         */
+        void RemoveAnimatedEntity(StaticEntity* ent);
         
-        //! A method that adds a dynamic rigid body to the simulation world.
+        //! NEW: A method that adds a dynamic rigid body to the simulation world.
         /*!
          \param ent a pointer to the dynamic body object
          \param origin a pose of the body in the world frame
          */
         void AddSolidEntity(SolidEntity* ent, const Transform& origin);
-
-        //! A method that removes a dynamic rigid body from the simulation world.
+        
+        //! NEW: A method that removes a dynamic rigid body from the simulation world.
         /*!
          \param ent a pointer to the dynamic body object
          */
         void RemoveSolidEntity(SolidEntity* ent);
+        
+        //! NEW: A method to respawn a dynamic rigid body at a target origin.
+        /*!
+         \param ent a pointer to the dynamic body object
+         \param origin a pose of the body in the world frame
+        */
+        void RespawnSolidEntity(SolidEntity* ent, Transform origin);
+
+        //! NEW: A method to apply a wrench to an entity by name
+        /*!
+         \param name name of the entity
+         \param force force vector in N, F =[x,y,z]
+         \param torque torque vector in N.m, M=[x,y,z]
+         \param linkIndex link id to apply wrench to, defaults to base link
+         (would be cool if we could get link by name)
+        */
+        bool ApplyWrench(const std::string& name, const Vector3& force, const Vector3& torque, unsigned int linkIndex = 0);
 
         //! A method that adds a rigid multibody to the simulation world.
         /*!
@@ -241,9 +303,19 @@ namespace sf
         //! A method used to enable ocean simulation.
         /*!
          \param waves the state of the ocean (waves enabled when >0)
+         \param oceanType sea_state" for legacy sea state constructor, and "params" for new parameters.
+         \param windSpeed eckv U10 m/s (wind at 10 m altitude)
+         \param direction downwind direction
+         \param age eckv Omega (inverse age)
          \param f a pointer to a liquid that will feel the ocean (if left blank defaults to water)
          */
-        void EnableOcean(Scalar waves = Scalar(0), Fluid f = Fluid());
+        void EnableOcean(
+            Scalar waves = Scalar(0), 
+            std::string oceanType = "",
+            Scalar windSpeed = Scalar(0),
+            Scalar direction = Scalar(0),
+            Scalar age = Scalar(0), 
+            Fluid f = Fluid());
         
         //! A method used to enable atmosphere simulation.
         void EnableAtmosphere();
@@ -496,6 +568,12 @@ namespace sf
 
         //! A method returning the simulation setup related to joint constraints.
         void getJointErp(Scalar& erp, Scalar& stopErp) const;
+
+        //! NEW: Method to check for pending structural changes (i.e. reconstructing ocean)
+        virtual bool HasPendingStructuralChanges() { return false; }
+
+        //! NEW: Empty callback to apply pending structural changes (i.e. reconstructing ocean)
+        virtual void ApplyStructuralChanges() {}
         
         //------ Aliases created to shorten the code needed to build the scenario ------
         
@@ -577,6 +655,7 @@ namespace sf
         SDL_mutex* simSettingsMutex;
         SDL_mutex* simInfoMutex;
         SDL_mutex* simHydroMutex;
+        SDL_mutex* entitiesMutex; // NEW: entities mutex for dynamic spawn
         
         // IC solver settings
         bool icUseGravity;

@@ -37,12 +37,28 @@
 namespace sf
 {
 
-OpenGLRealOcean::OpenGLRealOcean(GLfloat size, GLfloat state, SDL_mutex* hydrodynamics) : OpenGLOcean(size)
+OpenGLRealOcean::OpenGLRealOcean(GLfloat size, GLfloat state, std::string oceanType,
+    GLfloat eckvWindSpeed, GLfloat eckvDirection, GLfloat eckvAge, 
+    SDL_mutex* hydrodynamics) : OpenGLOcean(size)
 {
     hydroMutex = hydrodynamics;
-    params.wind = state*5.f + 2.f;
-    params.A = 1.f;
-    params.omega = 5.f*expf(-state) + 0.2f;
+    if (oceanType == "params")
+    {
+        cInfo("Got ECKV wave parameters: wind=%.2f, dir=%.2f, age=%.2f", eckvWindSpeed, eckvDirection, eckvAge);
+        params.type_ = "params";
+        params.wind = eckvWindSpeed;
+        params.dir = eckvDirection;
+        params.A = 1.f;
+        params.omega = eckvAge;
+    }
+    else if (oceanType == "sea_state")
+    {
+        cInfo("Got ECKV sea state: %.2f", state);
+        params.type_ = "sea_state";
+        params.wind = state*5.f + 2.f;
+        params.A = 1.f;
+        params.omega = 5.f*expf(-state) + 0.2f;
+    }
     GLint layers = 4;    
     qtGridTessFactor = 8; // Patch tessellation [2, 256]
     qtGPUTessFactor = 0;  // GPU tessellation factor [0,5]
@@ -330,8 +346,38 @@ GLfloat OpenGLRealOcean::ComputeWaveHeight(GLfloat x, GLfloat y)
     return z;
 }
 
+// NEW: method to compute wave height map for a set of points instead of a single point. 
+// Usefull for operations involving for loops and mutexes.
+std::vector<float> OpenGLRealOcean::ComputeWaveHeightMap(const std::vector<glm::vec3>& pts)
+{
+    std::vector<float> out(pts.size());
+    const float gx = params.gridSizes.x;
+    const float gy = params.gridSizes.y;
+
+    // fftData is read-only here (caller holds hydroMutex for the whole batch),
+    // ComputeInterpolatedWaveData only reads -> safe to parallelize.
+    #pragma omp parallel for
+    for(long n = 0; n < (long)pts.size(); ++n)
+    {
+        float z = 0.f;
+        z -= ComputeInterpolatedWaveData(pts[n].x/gx, pts[n].y/gx, 0);
+        z -= ComputeInterpolatedWaveData(pts[n].x/gy, pts[n].y/gy, 1);
+        out[n] = z;
+    }
+    return out;
+}
+
 void OpenGLRealOcean::Simulate(GLfloat dt)
 {
+
+    // NEW: calls the update callback if it is set. This allows the user to change the ocean parameters at runtime.
+    if(updateCallback_) 
+    {
+        cInfo("Invoking ocean update callback");
+        updateCallback_(); // may replace glOcean, so 'this' is dead after — return immediately
+        return;            // the new instance will be simulated next frame
+    }
+
     if(SDL_TryLockMutex(hydroMutex) == 0)
     {
         glBindBuffer(GL_PIXEL_PACK_BUFFER, fftPBO);

@@ -38,11 +38,24 @@
 
 namespace sf
 {
-
-Ocean::Ocean(std::string uniqueName, Scalar waves, Fluid l) : ForcefieldEntity(uniqueName)
+/* NEW: 
+    Added new way to create ocean with more parameters, including:
+        wind speed, direction, and age. 
+    Preserved legacy constructor by change wave type:
+        "sea_state" for legacy sea state, and "params" for new parameters.
+*/
+ Ocean::Ocean(std::string uniqueName, Scalar waves, Fluid l,
+        std::string oceanType,
+        Scalar windSpeed, Scalar direction, Scalar age) : ForcefieldEntity(uniqueName)
 {
     ghost->setCollisionFlags(ghost->getCollisionFlags() | btCollisionObject::CF_STATIC_OBJECT);
     oceanState = waves > Scalar(2.0) ? Scalar(2.0) : waves;
+
+    // Set ocean type and parameters
+    oceanType_ = oceanType;
+    eckvWindSpeed = windSpeed;
+    eckvDirection = direction;
+    eckvAge = age;
      
     Scalar size(100000);
     depth = size;
@@ -76,7 +89,13 @@ Ocean::~Ocean()
 
 bool Ocean::hasWaves() const
 {
-    return oceanState > Scalar(0);
+    // NEW: If Ocean type is set to a valid construction type, then waves are enabled.
+    bool has_waves = false;
+    if (oceanType_ == "params")
+        has_waves = true;
+    if (oceanType_ == "sea_state")
+        has_waves = true;
+    return has_waves;
 }
 
 bool Ocean::hasParticles() const
@@ -114,6 +133,10 @@ VelocityField* Ocean::getVelocityField(size_t index)
     else
         return nullptr;
 }
+std::vector<VelocityField*> Ocean::getVelocityFields()
+{
+    return currents;
+}
 
 void Ocean::setWaterType(Scalar jerlov)
 { 
@@ -146,23 +169,43 @@ bool Ocean::IsInsideFluid(const Vector3& point)
     return GetDepth(point) >= Scalar(0);
 }
 
+std::vector<char> Ocean::IsInsideFluidMap(const std::vector<Vector3>& points)
+{
+    std::vector<glm::vec3> gp(points.size());
+    for(size_t i = 0; i < points.size(); ++i)
+        gp[i] = glm::vec3((float)points[i].x(), (float)points[i].y(), (float)points[i].z());
+
+    std::vector<float> d = GetDepthMap(gp);
+    std::vector<char> inside(points.size());          // NOT vector<bool> (bit-packed, unsafe for parallel writes)
+    for(size_t i = 0; i < d.size(); ++i)
+        inside[i] = (d[i] >= 0.f) ? 1 : 0;
+    return inside;
+}
+
 float Ocean::GetDepth(const glm::vec3& point)
 {
     if(hasWaves()) //Geometric waves
     {
+        /*
+        Requires Lock since ocean update destroys and recreates glOcean
+        This avoids sampling from a destroyed glOcean object giving a segfault.
+        */
+        SDL_LockMutex(hydroMutex_); 
         GLfloat waveHeight = glOcean->ComputeWaveHeight(point.x, point.y);
+        SDL_UnlockMutex(hydroMutex_);
         glm::vec3 wavePoint(point.x, point.y, waveHeight);
-#ifdef DEBUG_WAVES
-        wavesDebug.getDataAsPoints()->push_back(wavePoint);
-#endif
+        #ifdef DEBUG_WAVES
+                wavesDebug.getDataAsPoints()->push_back(wavePoint);
+        #endif
+        
         return point.z - waveHeight;
     }
     else //Flat surface
     {
         glm::vec3 wavePoint(point.x, point.y, 0.f);
-#ifdef DEBUG_WAVES  
-        wavesDebug.getDataAsPoints()->push_back(wavePoint);
-#endif
+        #ifdef DEBUG_WAVES  
+                wavesDebug.getDataAsPoints()->push_back(wavePoint);
+        #endif
         return point.z;
     }
 }
@@ -170,6 +213,26 @@ float Ocean::GetDepth(const glm::vec3& point)
 Scalar Ocean::GetDepth(const Vector3& point)
 {
     return Scalar(GetDepth(glm::vec3((GLfloat)point.getX(), (GLfloat)point.getY(), (GLfloat)point.getZ())));
+}
+
+// NEW: Get depth map for a set of points
+std::vector<float> Ocean::GetDepthMap(const std::vector<glm::vec3>& points)
+{
+    std::vector<float> depth(points.size());
+    SDL_LockMutex(hydroMutex_);
+    if(hasWaves())
+    {
+        std::vector<float> wh = glOcean->ComputeWaveHeightMap(points);   // one batched, parallel call
+        for(size_t n = 0; n < points.size(); ++n)
+            depth[n] = points[n].z - wh[n];
+    }
+    else
+    {
+        for(size_t n = 0; n < points.size(); ++n)
+            depth[n] = points[n].z;
+    }
+    SDL_UnlockMutex(hydroMutex_);
+    return depth;
 }
 
 Scalar Ocean::GetPressure(const Vector3& point)
@@ -269,11 +332,70 @@ void Ocean::ApplyFluidForces(btDynamicsWorld* world, btCollisionObject* co, bool
 
 void Ocean::InitGraphics(SDL_mutex* hydrodynamics)
 {
+    hydroMutex_ = hydrodynamics;
     if(oceanState > 0.0)
-        glOcean = new OpenGLRealOcean(depth, oceanState, hydrodynamics);
+    {
+        glOcean = new OpenGLRealOcean(depth, oceanState,
+            oceanType_, eckvWindSpeed, eckvDirection, eckvAge, hydrodynamics);
+    }
     else
         glOcean = new OpenGLFlatOcean(depth);
     setWaterType(0.2);
+}
+
+// NEW: Call OpenGLRealOcean::update() to queue the update of ocean params
+// Only possible if Ocean Type is "params" to protect legacy sea state ocean type.
+bool Ocean::UpdateOceanData(Scalar windSpeed, Scalar direction, Scalar age)
+{
+    SDL_LockMutex(hydroMutex_);
+    if(glOcean == nullptr) { SDL_UnlockMutex(hydroMutex_); return false; }
+    if(oceanType_ != "params")
+    {
+        SDL_UnlockMutex(hydroMutex_);
+        cInfo("Ocean::UpdateOceanData: sea state ocean type does not support changing conditions");
+        return false;
+    }
+    eckvWindSpeed = windSpeed;
+    eckvDirection = direction;
+    eckvAge = age;
+    ((OpenGLRealOcean*)glOcean)->setUpdateCallback([this](){ this->ApplyPendingOceanUpdate(); });
+    pendingOceanUpdate_.store(true);
+    SDL_UnlockMutex(hydroMutex_);
+    return true;
+}
+
+// NEW: Apply glOcean reconstruction with new params timely and without segfaults.
+void Ocean::ApplyPendingOceanUpdate()
+{
+    cInfo("Ocean::ApplyPendingOceanUpdate: invoked");
+    if(!pendingOceanUpdate_.load()) return;
+    pendingOceanUpdate_.store(false);
+    cInfo("Ocean::ApplyPendingOceanUpdate: rebuilding ocean (wind=%.2f, dir=%.2f, age=%.2f)",
+          eckvWindSpeed, eckvDirection, eckvAge);
+
+    float prevWaterType = (float)waterType;
+    bool  prevParticles = glOcean->getParticlesEnabled();
+
+    // 1) Snapshot the particle pointers and detach them from the old ocean
+    //    so its destructor leaves them alone.
+    auto particles = glOcean->getOceanParticles();  // copy of map (pointers only)
+    glOcean->clearParticleMap();
+
+    OpenGLOcean* newOcean = new OpenGLRealOcean(depth, oceanState, oceanType_,
+                    eckvWindSpeed, eckvDirection, eckvAge, hydroMutex_);
+    SDL_LockMutex(hydroMutex_);
+    delete glOcean;
+    glOcean = newOcean;
+    setWaterType(prevWaterType);
+    SDL_UnlockMutex(hydroMutex_);
+
+    // 2) Re-attach the existing particle objects to the new ocean.
+    for(const auto& kv : particles)
+        glOcean->AssignParticles(kv.first, kv.second);
+
+    setParticles(prevParticles);
+
+    ((OpenGLRealOcean*)glOcean)->setUpdateCallback(nullptr);
 }
 
 std::vector<Renderable> Ocean::Render()

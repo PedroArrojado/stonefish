@@ -366,7 +366,14 @@ void OpenGLPipeline::Render(SimulationManager* sim)
         ocean->getOpenGLOcean()->Simulate(dt);
         renderMode = rSettings.ocean > RenderQuality::DISABLED && ocean->isRenderable() ? 1 : 0;
     }
-    Atmosphere* atm = sim->getAtmosphere();
+
+    //New: Advance Atmosphere Velocity field in time (particle advection)
+    Atmosphere* atmosphere = sim->getAtmosphere();
+    if(atmosphere != nullptr)
+    {
+        atmosphere->getOpenGLAtmosphere()->Simulate(dt);
+    }
+
     OpenGLState::EnableDepthTest();
     OpenGLState::EnableCullFace();
     
@@ -482,9 +489,9 @@ void OpenGLPipeline::Render(SimulationManager* sim)
                     if(rSettings.shadows > RenderQuality::DISABLED)
                     {
                         content->SetDrawingMode(DrawingMode::SHADOW);
-                        atm->getOpenGLAtmosphere()->BakeShadowmaps(this, camera);
+                        atmosphere->getOpenGLAtmosphere()->BakeShadowmaps(this, camera);
                     }
-                    atm->getOpenGLAtmosphere()->SetupMaterialShaders();
+                    atmosphere->getOpenGLAtmosphere()->SetupMaterialShaders();
     
                     //Clear main framebuffer and setup camera
                     OpenGLState::BindFramebuffer(camera->getRenderFBO());
@@ -503,7 +510,7 @@ void OpenGLPipeline::Render(SimulationManager* sim)
                         DrawObjects();
                     
                         //Render sky (at the end to take profit of early bailing)
-                        atm->getOpenGLAtmosphere()->DrawSkyAndSunTemperature(camera);
+                        atmosphere->getOpenGLAtmosphere()->DrawSkyAndSunTemperature(camera);
                     }
                     else if(renderMode == 1) //OCEAN
                     {
@@ -522,7 +529,7 @@ void OpenGLPipeline::Render(SimulationManager* sim)
                         DrawObjects();
                         
                         //Render sky (left for the end to only fill empty spaces)
-                        atm->getOpenGLAtmosphere()->DrawSkyAndSunTemperature(camera);
+                        atmosphere->getOpenGLAtmosphere()->DrawSkyAndSunTemperature(camera);
                     }
                 }
                 //Flip thermal image and render display texture
@@ -577,9 +584,9 @@ void OpenGLPipeline::Render(SimulationManager* sim)
                 if(rSettings.shadows > RenderQuality::DISABLED)
                 {
                     content->SetDrawingMode(DrawingMode::SHADOW);
-                    atm->getOpenGLAtmosphere()->BakeShadowmaps(this, camera);
+                    atmosphere->getOpenGLAtmosphere()->BakeShadowmaps(this, camera);
                 }
-                atm->getOpenGLAtmosphere()->SetupMaterialShaders();
+                atmosphere->getOpenGLAtmosphere()->SetupMaterialShaders();
             
                 //Clear main framebuffer and setup camera
                 OpenGLState::BindFramebuffer(camera->getRenderFBO());
@@ -602,7 +609,7 @@ void OpenGLPipeline::Render(SimulationManager* sim)
                         camera->DrawAO(1.0f);
                     
                     //Render sky (at the end to take profit of early bailing)
-                    atm->getOpenGLAtmosphere()->DrawSkyAndSun(camera);
+                    atmosphere->getOpenGLAtmosphere()->DrawSkyAndSun(camera);
                 }
                 else if(renderMode == 1) //OCEAN
                 {
@@ -682,7 +689,7 @@ void OpenGLPipeline::Render(SimulationManager* sim)
                         DrawLights();
                     
                         //Render sky (left for the end to only fill empty spaces)
-                        atm->getOpenGLAtmosphere()->DrawSkyAndSun(camera);    
+                        atmosphere->getOpenGLAtmosphere()->DrawSkyAndSun(camera);    
 
                         //Postprocess
                         if(rSettings.ssr > RenderQuality::DISABLED)
@@ -727,7 +734,19 @@ void OpenGLPipeline::Render(SimulationManager* sim)
                     glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
                     //if(sim->getSolidDisplayMode() == DisplayMode::PHYSICAL) DrawObjects();
                     DrawHelpers();
-                    if(hSettings.showOceanVelocityField && ocean != NULL) ocean->getOpenGLOcean()->DrawVelocityField(camera, 5.f);
+                    
+                    //NEW: Draw ocean and atmosphere velocity fields with glyph tracers (dynamic particles)
+                    if(hSettings.showOceanVelocityField && ocean != NULL)
+                    {
+                        ocean->getOpenGLOcean()->UpdateOceanParticles(camera, dt, ocean);
+                        ocean->getOpenGLOcean()->DrawVelocityField(camera, 30.f);
+                    }
+                    if(hSettings.showAtmosphereVelocityField && atmosphere != NULL)
+                    {
+                        atmosphere->getOpenGLAtmosphere()->UpdateAirParticles(camera, dt, atmosphere);
+                        atmosphere->getOpenGLAtmosphere()->DrawVelocityField(camera, 30.f);
+                    }
+
                     if(hSettings.showBulletDebugInfo) sim->RenderBulletDebug();
                     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
                     

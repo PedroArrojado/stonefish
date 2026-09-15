@@ -63,6 +63,18 @@ namespace sf
 
         //! A method returning the type of the velocity field.
         VelocityFieldType getType() const;
+
+        //! NEW: Methods to enable/disable turbulence and gusts.
+        void enableTurbulence() { turbulence_enabled=true; }
+        void disableTurbulence() { turbulence_enabled=false; }
+        void enableGust() { gust_enabled=true; }
+        void disableGust() { gust_enabled=false; }
+
+        TurbulenceMixer m_turbulence;
+        GustMixer m_gust;
+
+        bool turbulence_enabled=false;
+        bool gust_enabled=false;
         
     private:
         Vector3 v;

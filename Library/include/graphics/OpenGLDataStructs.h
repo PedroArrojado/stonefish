@@ -73,6 +73,7 @@
 #define UBO_LIGHTS              ((GLuint)2)
 #define UBO_VIEW                ((GLuint)3)
 #define UBO_OCEAN_CURRENTS      ((GLuint)4)
+#define UBO_AIR_CURRENTS        ((GLuint)5)
 
 //Standard SSBO bindings
 #define SSBO_HISTOGRAM          ((GLuint)1)
@@ -90,6 +91,7 @@
 #define MAX_POINT_LIGHTS        ((GLint)32)
 #define MAX_SPOT_LIGHTS         ((GLint)32)
 #define MAX_OCEAN_CURRENTS      ((GLint)64)
+#define MAX_AIR_CURRENTS        ((GLint)64)
 #define SPOT_LIGHT_SHADOWMAP_SIZE   ((GLint)2048)
 
 class btTransform;
@@ -595,6 +597,7 @@ namespace sf
         bool showSensors;
         bool showFluidDynamics;
         bool showOceanVelocityField;
+        bool showAtmosphereVelocityField; //NEW: Same function as ocean
         bool showForces;
         bool showBulletDebugInfo;
         
@@ -607,6 +610,7 @@ namespace sf
             showSensors = false;
             showFluidDynamics = false;
             showOceanVelocityField = false;
+            showAtmosphereVelocityField = false; //NEW: Same function as ocean
             showForces = false;
             showBulletDebugInfo = false;
         }

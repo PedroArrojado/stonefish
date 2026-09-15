@@ -38,6 +38,7 @@
 #include <thread>
 #include <typeinfo>
 #include <algorithm>
+#include <omp.h>
 #include "core/FilteredCollisionDispatcher.h"
 #include "core/GraphicalSimulationApp.h"
 #include "core/NameManager.h"
@@ -69,6 +70,8 @@
 #include "comms/Comm.h"
 #include "sensors/Contact.h"
 #include "sensors/VisionSensor.h"
+#include "entities/forcefields/VelocityField.h"
+
 
 extern ContactAddedCallback gContactAddedCallback;
 extern ContactProcessedCallback gContactProcessedCallback;
@@ -108,6 +111,8 @@ SimulationManager::SimulationManager(Scalar stepsPerSecond, Solver st, Collision
     simHydroMutex = SDL_CreateMutex();
     simSettingsMutex = SDL_CreateMutex();
     simInfoMutex = SDL_CreateMutex();
+    entitiesMutex = SDL_CreateMutex(); // NEW: entities mutex for dynamic spawn
+
     setStepsPerSecond(stepsPerSecond);
     
     //Set IC solver params
@@ -128,9 +133,33 @@ SimulationManager::~SimulationManager()
     SDL_DestroyMutex(simSettingsMutex);
     SDL_DestroyMutex(simInfoMutex);
     SDL_DestroyMutex(simHydroMutex);
+    SDL_DestroyMutex(entitiesMutex); // NEW: entities mutex for dynamic spawn
     delete materialManager;
     delete nameManager;
     delete ned;
+}
+
+SDL_mutex* SimulationManager::getEntitiesMutex() const
+{
+    return entitiesMutex;
+}
+
+std::vector<Entity*> SimulationManager::getEntities()
+{
+    SDL_LockMutex(entitiesMutex);
+    std::vector<Entity*> snapshot = entities;
+    SDL_UnlockMutex(entitiesMutex);
+    return snapshot;
+}
+
+void SimulationManager::removeEntityFromList(Entity* entity)
+{
+    SDL_LockMutex(entitiesMutex);
+    auto it = std::find(entities.begin(), entities.end(), entity);
+    if (it != entities.end()) {
+        entities.erase(it);
+    }
+    SDL_UnlockMutex(entitiesMutex);
 }
 
 void SimulationManager::AddRobot(Robot* robot, const Transform& worldTransform)
@@ -142,11 +171,69 @@ void SimulationManager::AddRobot(Robot* robot, const Transform& worldTransform)
     }
 }
 
+// NEW: This is not working: segfault, something is failing to clear
+bool SimulationManager::RemoveRobot(Robot* robot)
+{
+    if(robot == nullptr) return false;
+
+    // Snapshot the robot's devices ONCE, while robot->sensors etc. are fully intact.
+    // All later steps use these copies; we never call robot->getSensor() after this,
+    // because deletes would leave robot's own lists dangling.
+    std::vector<Sensor*>   robotSensors;
+    std::vector<Actuator*> robotActuators;
+    std::vector<Comm*>     robotComms;
+    for(size_t i=0; ; ++i){ Sensor*   s = robot->getSensor(i);   if(!s) break; robotSensors.push_back(s); }
+    for(size_t i=0; ; ++i){ Actuator* a = robot->getActuator(i); if(!a) break; robotActuators.push_back(a); }
+    for(size_t i=0; ; ++i){ Comm*     c = robot->getComm(i);     if(!c) break; robotComms.push_back(c); }
+
+    // (1) Deregister vision-sensor render views FIRST, under the drawing-queue lock.
+    SDL_mutex* dqMutex = nullptr;
+    if(SimulationApp::getApp()->hasGraphics())
+        dqMutex = ((GraphicalSimulationApp*)SimulationApp::getApp())->getGLPipeline()->getDrawingQueueMutex();
+    if(dqMutex) SDL_LockMutex(dqMutex);
+    for(Sensor* s : robotSensors)
+        if(s->getType() == SensorType::VISION)
+            static_cast<VisionSensor*>(s)->RemoveFromGraphics();
+    if(dqMutex) SDL_UnlockMutex(dqMutex);
+
+    // (2) Detach devices from the MANAGER's iteration lists (no deletes yet).
+    SDL_LockMutex(entitiesMutex);
+    for(Sensor* s : robotSensors)   { auto it=std::find(sensors.begin(),sensors.end(),s);     if(it!=sensors.end())   sensors.erase(it); }
+    for(Actuator* a : robotActuators){ auto it=std::find(actuators.begin(),actuators.end(),a); if(it!=actuators.end()) actuators.erase(it); }
+    for(Comm* c : robotComms)       { auto it=std::find(comms.begin(),comms.end(),c);         if(it!=comms.end())     comms.erase(it); }
+    SDL_UnlockMutex(entitiesMutex);
+
+    // (3) Detach the multibody from Bullet + entities list (links still alive).
+    FeatherstoneEntity* fe = nullptr;
+    if(robot->getType() == RobotType::FEATHERSTONE)
+    {
+        fe = static_cast<FeatherstoneRobot*>(robot)->getDynamics();
+        RemoveFeatherstoneEntity(fe);   // erases from entities + RemoveFromSimulation, no delete
+    }
+
+    // (4) Free devices while their links are still alive (dtors may deref links).
+    for(Sensor* s : robotSensors)    { cInfo("del sensor %s",   s->getName().c_str()); delete s; }
+    for(Actuator* a : robotActuators){ cInfo("del actuator %s", a->getName().c_str()); delete a; }
+    for(Comm* c : robotComms)        { cInfo("del comm %s",     c->getName().c_str()); delete c; }
+    cInfo("del dynamics");
+    if(fe != nullptr) delete fe;
+
+    SDL_LockMutex(entitiesMutex);
+    auto rit = std::find(robots.begin(), robots.end(), robot);
+    if(rit != robots.end()) robots.erase(rit);
+    SDL_UnlockMutex(entitiesMutex);
+    delete robot;
+
+    return true;
+}
+
 void SimulationManager::AddEntity(Entity *ent)
 {
     if(ent != nullptr)
     {
+        SDL_LockMutex(entitiesMutex);
         entities.push_back(ent);
+        SDL_UnlockMutex(entitiesMutex);
         ent->AddToSimulation(this);
     }
 }
@@ -155,16 +242,108 @@ void SimulationManager::AddStaticEntity(StaticEntity* ent, const Transform& orig
 {
     if(ent != nullptr)
     {
+        SDL_LockMutex(entitiesMutex);
         entities.push_back(ent);
+        SDL_UnlockMutex(entitiesMutex);
         ent->AddToSimulation(this, origin);
     }
+}
+
+// NEW: A method to remove static entity
+void SimulationManager::RemoveStaticEntity(StaticEntity* ent)
+{
+    cInfo("Attempting to remove static enity");
+    if(ent != nullptr)
+    {
+        SDL_LockMutex(entitiesMutex);
+        auto it = std::find(entities.begin(), entities.end(), ent);
+        if(it != entities.end() && (*it)->getType() == EntityType::STATIC)
+        {
+            StaticEntity* solid = static_cast<StaticEntity*>(*it);
+            solid->RemoveFromSimulation(this);
+            entities.erase(it);
+        }
+        SDL_UnlockMutex(entitiesMutex);
+    }
+}
+
+// NEW: A method to respawn a static entity
+void SimulationManager::RespawnStaticEntity(StaticEntity* ent, Transform origin)
+{
+    cInfo("Attempting to respawn static entity.");
+    
+    if (ent == nullptr)
+    {
+        cInfo("Error: Passed 'ent' pointer is NULL!");
+        return;
+    }
+
+    SDL_LockMutex(entitiesMutex);
+    
+    // Check if the entity exists in the master list
+    auto it = std::find(entities.begin(), entities.end(), ent);
+    if (it == entities.end())
+    {
+        SDL_UnlockMutex(entitiesMutex);
+        return;
+    }
+
+    // Check if the type matches
+    if ((*it)->getType() != EntityType::STATIC)
+    {
+        cInfo("Error: Found entity '%s', but its type is %d (Not STATIC!).", 
+              (*it)->getName().c_str(), static_cast<int>((*it)->getType()));
+        SDL_UnlockMutex(entitiesMutex);
+        return;
+    }
+
+    // If we reached here, the entity is found and validated
+    cInfo("Found static entity /%s in vector, proceeding with respawn...", (*it)->getName().c_str());
+    StaticEntity* staticEnt = static_cast<StaticEntity*>(*it);
+    
+    btRigidBody* body = staticEnt->getRigidBody();
+    if (body == nullptr)
+    {
+        cInfo("Error: Rigid body for entity '%s' is NULL!", staticEnt->getName().c_str());
+        SDL_UnlockMutex(entitiesMutex);
+        return;
+    }
+
+    btVector3 pos = origin.getOrigin();
+    cInfo("Target Destination -> X: %f, Y: %f, Z: %f", pos.getX(), pos.getY(), pos.getZ());
+
+    // 1. Update Stonefish's internal pose (syncs visual transform + OpenGL node)
+    staticEnt->setTransform(origin);
+    cInfo("Stonefish pose updated.");
+
+    // 2. Update Bullet rigid body transforms explicitly as well
+    //    (setPose may or may not do this depending on the Stonefish version)
+    body->setWorldTransform(origin);
+    body->setInterpolationWorldTransform(origin);
+    body->clearForces();
+    cInfo("Bullet rigid body transforms updated.");
+
+    // 3. Update broadphase AABB so collision detection is consistent
+    if (dynamicsWorld && body->getBroadphaseHandle())
+    {
+        dynamicsWorld->updateSingleAabb(body);
+        cInfo("Broadphase AABB updated.");
+    }
+
+    // 4. Activate
+    body->activate(true);
+
+    SDL_UnlockMutex(entitiesMutex);
+    cInfo("RespawnStaticEntity complete.");
 }
 
 void SimulationManager::AddAnimatedEntity(AnimatedEntity* ent)
 {
     if(ent != nullptr)
     {
+        SDL_LockMutex(entitiesMutex);
         entities.push_back(ent);
+        SDL_UnlockMutex(entitiesMutex);
         ent->AddToSimulation(this);
     }
 }
@@ -173,15 +352,20 @@ void SimulationManager::AddSolidEntity(SolidEntity* ent, const Transform& origin
 {
     if(ent != nullptr)
     {
+        SDL_LockMutex(entitiesMutex);
         entities.push_back(ent);
+        SDL_UnlockMutex(entitiesMutex);
         ent->AddToSimulation(this, origin);
     }
 }
 
+// NEW: A method to remove entity (added mutex)
 void SimulationManager::RemoveSolidEntity(SolidEntity* ent)
 {
+    cInfo("Attempting to remove solid enity");
     if(ent != nullptr)
     {
+        SDL_LockMutex(entitiesMutex);
         auto it = std::find(entities.begin(), entities.end(), ent);
         if(it != entities.end() && (*it)->getType() == EntityType::SOLID)
         {
@@ -189,14 +373,156 @@ void SimulationManager::RemoveSolidEntity(SolidEntity* ent)
             solid->RemoveFromSimulation(this);
             entities.erase(it);
         }
+        SDL_UnlockMutex(entitiesMutex);
     }
+}
+
+// NEW: A method to respawn a solid entity
+void SimulationManager::RespawnSolidEntity(SolidEntity* ent, Transform origin)
+{
+    cInfo("Attempting to respawn solid entity.");
+    
+    if (ent == nullptr)
+    {
+        cInfo("Error: Passed 'ent' pointer is NULL!");
+        return;
+    }
+    
+    SDL_LockMutex(entitiesMutex);
+    
+    // Check if the entity exists in the master list
+    auto it = std::find(entities.begin(), entities.end(), ent);
+    if (it == entities.end())
+    {
+        cInfo("Error: Entity not found in master list!");
+        SDL_UnlockMutex(entitiesMutex);
+        return;
+    }
+
+    // Check if the type matches
+    if ((*it)->getType() != EntityType::SOLID)
+    {
+        cInfo("Error: Found entity '%s', but its type is %d (Not SOLID!).", 
+              (*it)->getName().c_str(), static_cast<int>((*it)->getType()));
+        SDL_UnlockMutex(entitiesMutex);
+        return;
+    }
+
+    // If we reached here, the entity is found and validated
+    cInfo("Found solid entity /%s in vector, proceeding with respawn...", (*it)->getName().c_str());
+    SolidEntity* solidEnt = static_cast<SolidEntity*>(*it);
+    
+    btRigidBody* body = solidEnt->getRigidBody();
+    if (body == nullptr)
+    {
+        cInfo("Error: Rigid body for entity '%s' is NULL!", solidEnt->getName().c_str());
+        SDL_UnlockMutex(entitiesMutex);
+        return;
+    }
+
+    btVector3 pos = origin.getOrigin();
+    cInfo("Target Destination -> X: %f, Y: %f, Z: %f", pos.getX(), pos.getY(), pos.getZ());
+
+    // 1. Update Stonefish's internal pose (syncs visual transform + OpenGL node)
+    solidEnt->setCGTransform(origin);
+    cInfo("Stonefish pose updated.");
+
+    // 2. Update Bullet rigid body transforms explicitly as well
+    //    (setPose may or may not do this depending on the Stonefish version)
+    body->setWorldTransform(origin);
+    body->setInterpolationWorldTransform(origin);
+    body->clearForces();
+    cInfo("Bullet rigid body transforms updated.");
+
+    // 3. Update broadphase AABB so collision detection is consistent
+    if (dynamicsWorld && body->getBroadphaseHandle())
+    {
+        dynamicsWorld->updateSingleAabb(body);
+        cInfo("Broadphase AABB updated.");
+    }
+
+    // 4. Activate
+    body->activate(true);
+
+    SDL_UnlockMutex(entitiesMutex);
+    cInfo("RespawnSolidEntity complete.");
+}
+
+// NEW: A method to apply a wrench (had to change bullet code base -> btMultiBody.h solveImatrix to public access)
+bool SimulationManager::ApplyWrench(const std::string& name, const Vector3& force, const Vector3& torque, unsigned int linkIndex)
+{
+    for (Robot* robot : robots)
+    {
+        if (robot->getName() != name)
+            continue;
+
+        cInfo("Found robot /%s, applying wrench force [%f, %f, %f] N.s, torque [%f, %f, %f] N.m.s",
+             robot->getName().c_str(), 
+             force.x(), force.y(), force.z(), 
+             torque.x(), torque.y(), torque.z());
+
+        if (robot->getType() == RobotType::FEATHERSTONE)
+        {
+            FeatherstoneEntity* feather = static_cast<FeatherstoneRobot*>(robot)->getDynamics();
+            btMultiBody* mb = feather->getMultiBody();
+            if (mb == nullptr) return false;
+            mb->wakeUp();
+
+            // Rotate body-frame wrench into world frame
+            // getWorldToBaseRot() returns world→base, so its inverse (transpose for rotations) is base→world
+            btMatrix3x3 baseToWorld(mb->getWorldToBaseRot().inverse());
+            btVector3 forceWorld  = baseToWorld * force;
+            btVector3 torqueWorld = baseToWorld * torque;
+
+            btScalar deltaVee[6];
+            mb->solveImatrix(forceWorld, torqueWorld, deltaVee);
+
+            btVector3 dOmega(deltaVee[0], deltaVee[1], deltaVee[2]);
+            btVector3 dVel  (deltaVee[3], deltaVee[4], deltaVee[5]);
+            mb->setBaseOmega(mb->getBaseOmega() + dOmega);
+            mb->setBaseVel  (mb->getBaseVel()   + dVel);
+            return true;
+        }
+    }
+
+    // Search entities
+    for (Entity* ent : entities)
+    {
+        if (ent->getName() != name)
+            continue;
+        
+        cInfo("Found entity /%s, applying wrench force [%f, %f, %f] N.s, torque [%f, %f, %f] N.m.s",
+             ent->getName().c_str(), 
+             force.x(), force.y(), force.z(), 
+             torque.x(), torque.y(), torque.z());
+
+        if (ent->getType() == EntityType::SOLID)
+        {
+            SolidEntity* solid = static_cast<SolidEntity*>(ent);
+            btRigidBody* body = solid->getRigidBody();
+            if (body == nullptr) return false;
+            body->activate(true);
+
+            btMatrix3x3 bodyToWorld = body->getWorldTransform().getBasis();
+            btVector3 forceWorld  = bodyToWorld * force;
+            btVector3 torqueWorld = bodyToWorld * torque;
+
+            body->applyCentralImpulse(forceWorld);
+            body->applyTorqueImpulse(torqueWorld);
+            return true;
+        }
+        return false;
+    }
+    return false;
 }
 
 void SimulationManager::AddFeatherstoneEntity(FeatherstoneEntity* ent, const Transform& origin)
 {
     if(ent != nullptr)
     {
+        SDL_LockMutex(entitiesMutex);
         entities.push_back(ent);
+        SDL_UnlockMutex(entitiesMutex);
         ent->AddToSimulation(this, origin);
     }
 }
@@ -205,6 +531,7 @@ void SimulationManager::RemoveFeatherstoneEntity(FeatherstoneEntity* ent)
 {
     if(ent != nullptr)
     {
+        SDL_LockMutex(entitiesMutex);
         auto it = std::find(entities.begin(), entities.end(), ent);
         if(it != entities.end() && (*it)->getType() == EntityType::FEATHERSTONE)
         {
@@ -212,10 +539,17 @@ void SimulationManager::RemoveFeatherstoneEntity(FeatherstoneEntity* ent)
             fe->RemoveFromSimulation(this);
             entities.erase(it);
         }
+        SDL_UnlockMutex(entitiesMutex);
     }
 }
     
-void SimulationManager::EnableOcean(Scalar waves, Fluid f)
+void SimulationManager::EnableOcean(
+            Scalar waves, 
+            std::string oceanType,
+            Scalar windSpeed,
+            Scalar direction,
+            Scalar age, 
+            Fluid f)
 {
     if(ocean != nullptr)
         return;
@@ -228,7 +562,8 @@ void SimulationManager::EnableOcean(Scalar waves, Fluid f)
     
     bool hasGraphics = SimulationApp::getApp()->hasGraphics();
 
-    ocean = new Ocean("Ocean", hasGraphics ? waves : 0.0, f);
+    ocean = new Ocean("Ocean", hasGraphics ? waves : 0.0, f, oceanType,
+            windSpeed, direction, age);
     ocean->AddToSimulation(this);
     
     if(hasGraphics)
@@ -1073,47 +1408,95 @@ void SimulationManager::AdvanceSimulation()
     if(!icProblemSolved)
         return;
 
-    //Calculate eleapsed time
-    uint64_t deltaTime;
-
-    if(currentTime == 0) //Start of simulation
+    // NEW: fixed-timestep clock. Advances exactly ssus per call, no wall-clock
+    // measurement or drift correction. Ported from the Stonefish 5.0 branch.
+    // TODO: replace 'if(true)' with a proper flag/config option once validated,
+    // so this can live alongside the original method upstream.
+    if(true)
     {
-        deltaTime = 0.0;
-        simulationTime = 0.0;
-        currentTime = getSimulationClock();
-        timeOffset = currentTime;
-        return;
+        if(currentTime == 0) //Start of simulation
+        {
+            simulationTime = 0.0;
+            currentTime    = ssus;   // non-zero sentinel, no wall-clock query needed
+            timeOffset     = 0;
+            return;
+        }
+
+        // Sleep exactly one sim step (wall time = ssus/RTF)
+        // SimulationClockSleep advances accumulatedSimUs_ by ssus after sleeping
+        SimulationClockSleep(ssus);
+        currentTime += ssus;
+
+        // Step by the fixed interval — no measurement, no drift
+        StepSimulation((Scalar)ssus / Scalar(1000000.0));
+
+        SDL_LockMutex(simInfoMutex);
+        Scalar cpuUsageNow = (Scalar)perfMon.getPhysicsTime() / (Scalar)ssus * Scalar(100);
+        Scalar filter(0.001);
+        cpuUsage = filter * cpuUsageNow + (Scalar(1)-filter) * cpuUsage;
+        SDL_UnlockMutex(simInfoMutex);
     }
-
-    uint64_t timeInMicroseconds = getSimulationClock(); //Realtime factor included in clock
-    deltaTime = timeInMicroseconds - currentTime; 
-    currentTime = timeInMicroseconds;
-
-    if(deltaTime < ssus) //Sleep if clock did not tick one simulation step
+    else
     {
-        SimulationClockSleep(ssus - deltaTime);
-        timeInMicroseconds = getSimulationClock();
-        deltaTime += timeInMicroseconds - currentTime;
+        // Original: variable-timestep clock, tracks real time via getSimulationClock()
+        // (realtime factor included in the clock itself).
+        uint64_t deltaTime;
+
+        if(currentTime == 0) //Start of simulation
+        {
+            deltaTime = 0.0;
+            simulationTime = 0.0;
+            currentTime = getSimulationClock();
+            timeOffset = currentTime;
+            return;
+        }
+
+        uint64_t timeInMicroseconds = getSimulationClock(); //Realtime factor included in clock
+        deltaTime = timeInMicroseconds - currentTime;
         currentTime = timeInMicroseconds;
+
+        if(deltaTime < ssus) //Sleep if clock did not tick one simulation step
+        {
+            SimulationClockSleep(ssus - deltaTime);
+            timeInMicroseconds = getSimulationClock();
+            deltaTime += timeInMicroseconds - currentTime;
+            currentTime = timeInMicroseconds;
+        }
+
+        StepSimulation((Scalar)deltaTime / Scalar(1000000.0));
+
+        SDL_LockMutex(simInfoMutex);
+        Scalar cpuUsageNow = (Scalar)perfMon.getPhysicsTime() / (Scalar)deltaTime * Scalar(100);
+        Scalar filter(0.001);
+        cpuUsage = filter * cpuUsageNow + (Scalar(1)-filter) * cpuUsage;
+        SDL_UnlockMutex(simInfoMutex);
     }
-    
-    StepSimulation((Scalar)deltaTime/Scalar(1000000.0));
-    
-    SDL_LockMutex(simInfoMutex);
-    Scalar cpuUsageNow = (Scalar)perfMon.getPhysicsTime()/(Scalar)deltaTime * Scalar(100);
-    Scalar filter(0.001);
-    cpuUsage = filter * cpuUsageNow + (Scalar(1)-filter) * cpuUsage;   
-    SDL_UnlockMutex(simInfoMutex);
+}
+
+Scalar SimulationManager::getStepTime()
+{
+    return (Scalar)ssus / Scalar(1000000.0);
 }
 
 void SimulationManager::StepSimulation(Scalar timeStep)
 {
     SDL_LockMutex(simSettingsMutex);
     perfMon.PhysicsStarted();
-    dynamicsWorld->stepSimulation((Scalar)timeStep, 1000000, (Scalar)ssus/Scalar(1000000.0));
+    const Scalar fixedDt = (Scalar)ssus / Scalar(1000000.0);
+    dynamicsWorld->stepSimulation((Scalar)timeStep, 1000000, fixedDt);
     perfMon.PhysicsFinished();
     SDL_UnlockMutex(simSettingsMutex);
 
+    if (ocean != nullptr)
+    {
+        for(unsigned int i=0; i<ocean->getVelocityFields().size(); ++i)
+            ocean->getVelocityField(i)->Update(fixedDt);
+    }
+     if (atmosphere != nullptr)
+    {
+        for(unsigned int i=0; i<atmosphere->getVelocityFields().size(); ++i)
+            atmosphere->getVelocityField(i)->Update(fixedDt);
+    }
     //Inform about MLCP failures
     if(solver != Solver::SI)
     {
@@ -1193,7 +1576,10 @@ void SimulationManager::UpdateDrawingQueue()
     //Ocean currents
     if(ocean != nullptr)
         glPipeline->AddToDrawingQueue(ocean->Render(actuators));
-}
+    
+    //Air currents
+    if(atmosphere != nullptr)
+        glPipeline->AddToDrawingQueue(atmosphere->Render(actuators));}
 
 std::pair<Entity*, int>  SimulationManager::PickEntity(Vector3 eye, Vector3 ray)
 {
@@ -1518,7 +1904,8 @@ void SimulationManager::SimulationTickCallback(btDynamicsWorld* world, Scalar ti
     SimulationManager* simManager = (SimulationManager*)world->getWorldUserInfo();
     btSoftMultiBodyDynamicsWorld* dynamicsWorld = static_cast<btSoftMultiBodyDynamicsWorld*>(world);
     ThreadPool* threads = SimulationApp::getApp()->getPhysicsThreadPool();
-        
+    threads = nullptr;
+    
     //Clear all forces to ensure that no summing occurs
     dynamicsWorld->clearForces(); //Includes clearing of multibody forces!
         
@@ -1619,7 +2006,7 @@ void SimulationManager::SimulationTickCallback(btDynamicsWorld* world, Scalar ti
     //Hydrodynamic forces
     if(simManager->ocean != nullptr)
     {
-        if(recompute) SDL_LockMutex(simManager->simHydroMutex);
+        // if(recompute) SDL_LockMutex(simManager->simHydroMutex);
         simManager->perfMon.HydrodynamicsStarted();
         
         btBroadphasePairArray& pairArray = simManager->ocean->getGhost()->getOverlappingPairCache()->getOverlappingPairArray();
@@ -1651,7 +2038,7 @@ void SimulationManager::SimulationTickCallback(btDynamicsWorld* world, Scalar ti
             threads->waitAll();
 
         simManager->perfMon.HydrodynamicsFinished();
-        if(recompute) SDL_UnlockMutex(simManager->simHydroMutex);
+        // if(recompute) SDL_UnlockMutex(simManager->simHydroMutex);
     }
 }
 

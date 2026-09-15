@@ -50,6 +50,19 @@ Robot::~Robot()
         SimulationApp::getApp()->getSimulationManager()->getNameManager()->RemoveName(name_);
 }
 
+void Robot::ApplyWrench(const Vector3& force, const Vector3& torque)
+{
+    if (!links_.empty() && links_[0] != nullptr)
+    {
+        links_[0]->ApplyCentralForce(force);
+        links_[0]->ApplyTorque(torque);
+    }
+    else
+    {
+        cInfo("Robot has no links, wrench cannot be applied!");
+    }
+}
+
 std::string Robot::getName()
 {
     return name_;

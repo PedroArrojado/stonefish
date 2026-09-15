@@ -41,6 +41,52 @@ namespace sf
     enum class BodyFluidPosition {INSIDE, OUTSIDE, CROSSING_SURFACE};
     
     struct HydrodynamicsSettings;
+
+    //! NEW: Coefficients of the free-surface (asv_wave_sim style) drag model.
+    /*!
+     Used only by bodies whose physics mode is FLOATING. Submerged bodies keep
+     the original coefficient pair set through SetHydrodynamicCoefficients().
+
+     Two departures from the coefficients published with asv_wave_sim:
+
+     1. The pressure and suction coefficients here are DIMENSIONLESS drag
+        coefficients. The originals fold 0.5*rho into their value, which is why
+        they are quoted as 1.0E+2 rather than 0.2; density is applied in the
+        force computation instead, so the same hull parameters remain valid
+        across fluids and keep their conventional interpretation.
+
+     2. The global damping coefficients are per axis rather than scalar, and
+        rotational damping is given its own triple. The original model damps
+        translation isotropically and has no directional rotational term, so a
+        slender hull cannot be made to resist sway more than surge, nor roll
+        more than yaw.
+
+     Axes are those of the body ORIGIN frame, matching the convention used for
+     the submerged coefficients.
+     */
+    struct SurfaceDragParams
+    {
+        Vector3 cDampL1;  //!< Global linear damping, linear in speed, per axis.
+        Vector3 cDampL2;  //!< Global linear damping, quadratic in speed, per axis.
+        Vector3 cDampR1;  //!< Global angular damping, linear in rate, per axis.
+        Vector3 cDampR2;  //!< Global angular damping, quadratic in rate, per axis.
+        Scalar cPDrag1;   //!< Windward pressure drag coefficient, linear term.
+        Scalar cPDrag2;   //!< Windward pressure drag coefficient, quadratic term.
+        Scalar fPDrag;    //!< Windward cross-flow exponent.
+        Scalar cSDrag1;   //!< Leeward suction coefficient, linear term.
+        Scalar cSDrag2;   //!< Leeward suction coefficient, quadratic term.
+        Scalar fSDrag;    //!< Leeward cross-flow exponent.
+        Scalar vRDrag;    //!< Reference speed giving the linear terms force units [m/s].
+
+        SurfaceDragParams()
+            : cDampL1(Scalar(0.05), Scalar(0.05), Scalar(0.10)),
+              cDampL2(Scalar(0.10), Scalar(0.10), Scalar(0.20)),
+              cDampR1(Scalar(0.02), Scalar(0.02), Scalar(0.02)),
+              cDampR2(Scalar(0.05), Scalar(0.05), Scalar(0.05)),
+              cPDrag1(Scalar(0.2)), cPDrag2(Scalar(0.2)), fPDrag(Scalar(0.4)),
+              cSDrag1(Scalar(0.2)), cSDrag2(Scalar(0.2)), fSDrag(Scalar(0.4)),
+              vRDrag(Scalar(1.0)) {}
+    };
     class Ocean;
     class Atmosphere;
     
@@ -132,6 +178,35 @@ namespace sf
          \param _Vsub output of the submerged volume
          \param debug output of the debug rendering
         */
+        //! NEW: A method computing free-surface hydrodynamics, asv_wave_sim style.
+        /*!
+         Applied to bodies whose physics mode is FLOATING. Unlike
+         ComputeHydrodynamicForcesSurface() this routine applies density and the
+         coefficients itself, so CorrectHydrodynamicForces() must NOT be called
+         afterwards.
+
+         Buoyancy is obtained by integrating the hydrostatic pressure in closed
+         form over the submerged remainder of each clipped face, giving the
+         resultant and its true centre of pressure. Drag is the Kerner
+         windward/leeward pressure model with an ITTC-1957 skin friction line,
+         plus a global damping term.
+
+         \param settings settings of the hydrodynamic computation
+         \param mesh the physics mesh of the body
+         \param ocn a pointer to the ocean entity
+         \param T_CG a transform from the world frame to the CG frame
+         \param T_C a transform from the world frame to the physics mesh frame
+         \param T_O a transform from the world frame to the body origin frame
+         \param sdp the free-surface drag coefficients
+         \param totalVolume the full displaced volume of the body [m^3]
+         */
+        static void ComputeHydrodynamicForcesSurfaceWaveSim(const HydrodynamicsSettings& settings, const Mesh* mesh, Ocean* ocn,
+                                                     const Transform& T_CG, const Transform& T_C, const Transform& T_O,
+                                                     const Vector3& linearV, const Vector3& angularV, Vector3& _Fb, Vector3& _Tb,
+                                                     Vector3& _Fdq, Vector3& _Tdq, Vector3& _Fdf, Vector3& _Tdf,
+                                                     Scalar& _Swet, Scalar& _Vsub, Renderable& debug,
+                                                     const SurfaceDragParams& sdp, Scalar totalVolume);
+
         static void ComputeHydrodynamicForcesSurface(const HydrodynamicsSettings& settings, const Mesh* mesh, Ocean* liquid, const Transform& T_CG, const Transform& T_C,
                                                      const Vector3& linearV, const Vector3& angularV, Vector3& _Fb, Vector3& _Tb, Vector3& _Fdq, Vector3& _Tdq, Vector3& _Fdf, Vector3& _Tdf, 
                                                      Scalar& _Swet, Scalar& _Vsub, Renderable& debug);
@@ -233,6 +308,23 @@ namespace sf
          */
         void SetHydrodynamicCoefficients(const Vector3& Cd, const Vector3& Cf);
 
+        //! NEW: A method used to set the free-surface drag coefficients.
+        /*!
+         Only used by bodies whose physics mode is FLOATING.
+         \param sdp the coefficient set
+         */
+        void SetSurfaceDragParams(const SurfaceDragParams& sdp);
+
+        //! NEW: A method returning the free-surface drag coefficients.
+        const SurfaceDragParams& getSurfaceDragParams() const;
+
+        //! NEW: A method used to set aerodynamic coeffcients.
+        /*!
+         \param Cd a vector of form quadratic drag (quadratic drag) coefficients 
+         \param Cf a vector of skin friction (viscous drag) coefficients
+         */
+        void SetAerodynamicCoefficients(const Vector3& Cd, const Vector3& Cf);
+
         //! A method to set the body pose in the world frame.
         void setCGTransform(const Transform& trans);
         
@@ -313,6 +405,13 @@ namespace sf
          \param Cf a vector of skin friction (viscous drag) coefficients
          */
         void getHydrodynamicCoefficients(Vector3& Cd, Vector3& Cf) const;
+
+        //! NEW: method returning the aerodynamic coefficents for the body.
+        /*!
+         \param Cd a vector of form quadratic drag (quadratic drag) coefficients 
+         \param Cf a vector of skin friction (viscous drag) coefficients
+         */
+        void getAerodynamicCoefficients(Vector3& Cd, Vector3& Cf) const;
 
         //! A method returning the wetted surface area of the body.
         Scalar getWettedSurface() const;
@@ -422,6 +521,7 @@ namespace sf
 		Vector3 aI; //Hydrodynamic added inertia
         GeometryApproxType fdApproxType;
         std::vector<Scalar> fdApproxParams;
+        SurfaceDragParams surfDrag; // NEW: free-surface (FLOATING) coefficients
         Vector3 fdCd;
         Vector3 fdCf;
         Transform T_CG2H; //Transform between CG and hydrodynamic proxy frame
@@ -439,6 +539,9 @@ namespace sf
         Vector3 Fda;
         Vector3 Tda;
         
+        Vector3 aeroCd;     // NEW: Aero coeffs drag
+        Vector3 aeroCf;     // NEW:Aero coeffs vicous
+
         //Motion
         Vector3 lastV;
         Vector3 lastOmega;

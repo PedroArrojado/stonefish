@@ -34,6 +34,8 @@
 #include "graphics/OpenGLView.h"
 #include "graphics/OpenGLContent.h"
 #include "utils/SystemUtil.hpp"
+#include "graphics/OpenGLCurrentTracers.h"
+
 #ifdef EMBEDDED_RESOURCES
 #include <sstream>
 #include "ResourceHandle.h"
@@ -48,8 +50,6 @@ OpenGLAtmosphere::OpenGLAtmosphere(const std::string& modelFilename, RenderQuali
 {
     //Prepare for rendering
     for(unsigned short i=0; i<AtmosphereTextures::TEXTURE_COUNT; ++i) textures[i] = 0;
-    skySunShaders[0] = nullptr;
-    skySunShaders[1] = nullptr;
     
     //Init shadow baking
     sunShadowmapShader = nullptr;
@@ -97,6 +97,7 @@ OpenGLAtmosphere::OpenGLAtmosphere(const std::string& modelFilename, RenderQuali
     SetSunPosition(0.0, 45.0);
     setAirTemperature(20.0);
     setAirHumidity(0.5);
+    SetFog(glm::vec3(0.7f), 0.05f);
 
     //Permanently bind atmosphere textures
     OpenGLState::BindTexture(TEX_ATM_TRANSMITTANCE, GL_TEXTURE_2D, textures[AtmosphereTextures::TRANSMITTANCE]);
@@ -111,35 +112,65 @@ OpenGLAtmosphere::OpenGLAtmosphere(const std::string& modelFilename, RenderQuali
     sources.push_back(GLSLSource(GL_FRAGMENT_SHADER, "atmSkySun.frag"));
     
     //Sky rendering
-    skySunShaders[0] = new GLSLShader(sources, compiledShaders);
-    skySunShaders[0]->AddUniform("transmittance_texture", ParameterType::INT);
-    skySunShaders[0]->AddUniform("scattering_texture", ParameterType::INT);
-    skySunShaders[0]->AddUniform("single_mie_scattering_texture", ParameterType::INT);
-    skySunShaders[0]->AddUniform("eyePos", ParameterType::VEC3);
-    skySunShaders[0]->AddUniform("sunDir", ParameterType::VEC3);
-    skySunShaders[0]->AddUniform("invView", ParameterType::MAT4);
-    skySunShaders[0]->AddUniform("invProj", ParameterType::MAT4);
-    skySunShaders[0]->AddUniform("whitePoint", ParameterType::VEC3);
-    skySunShaders[0]->AddUniform("cosSunSize", ParameterType::FLOAT);
-	skySunShaders[0]->AddUniform("bottomRadius", ParameterType::FLOAT);
-	skySunShaders[0]->AddUniform("groundAlbedo", ParameterType::FLOAT);
+    skySunShaders["sky_rendering_0"]  = new GLSLShader(sources, compiledShaders);
+    skySunShaders["sky_rendering_0"]->AddUniform("transmittance_texture", ParameterType::INT);
+    skySunShaders["sky_rendering_0"]->AddUniform("scattering_texture", ParameterType::INT);
+    skySunShaders["sky_rendering_0"]->AddUniform("single_mie_scattering_texture", ParameterType::INT);
+    skySunShaders["sky_rendering_0"]->AddUniform("eyePos", ParameterType::VEC3);
+    skySunShaders["sky_rendering_0"]->AddUniform("sunDir", ParameterType::VEC3);
+    skySunShaders["sky_rendering_0"]->AddUniform("invView", ParameterType::MAT4);
+    skySunShaders["sky_rendering_0"]->AddUniform("invProj", ParameterType::MAT4);
+    skySunShaders["sky_rendering_0"]->AddUniform("whitePoint", ParameterType::VEC3);
+    skySunShaders["sky_rendering_0"]->AddUniform("cosSunSize", ParameterType::FLOAT);
+	skySunShaders["sky_rendering_0"]->AddUniform("bottomRadius", ParameterType::FLOAT);
+	skySunShaders["sky_rendering_0"]->AddUniform("groundAlbedo", ParameterType::FLOAT);
 
     sources.pop_back();
     sources.push_back(GLSLSource(GL_FRAGMENT_SHADER, "atmSkySunTemp.frag"));
-    skySunShaders[1] = new GLSLShader(sources, compiledShaders);
-    skySunShaders[1]->AddUniform("transmittance_texture", ParameterType::INT);
-    skySunShaders[1]->AddUniform("scattering_texture", ParameterType::INT);
-    skySunShaders[1]->AddUniform("single_mie_scattering_texture", ParameterType::INT);
-    skySunShaders[1]->AddUniform("eyePos", ParameterType::VEC3);
-    skySunShaders[1]->AddUniform("sunDir", ParameterType::VEC3);
-    skySunShaders[1]->AddUniform("invView", ParameterType::MAT4);
-    skySunShaders[1]->AddUniform("invProj", ParameterType::MAT4);
-    skySunShaders[1]->AddUniform("whitePoint", ParameterType::VEC3);
-    skySunShaders[1]->AddUniform("cosSunSize", ParameterType::FLOAT);
-	skySunShaders[1]->AddUniform("bottomRadius", ParameterType::FLOAT);
-	skySunShaders[1]->AddUniform("groundAlbedo", ParameterType::FLOAT);
-    skySunShaders[1]->AddUniform("skyEmissivity", ParameterType::FLOAT);
-    skySunShaders[1]->AddUniform("airTemperature", ParameterType::FLOAT);
+    skySunShaders["sky_rendering_1"] = new GLSLShader(sources, compiledShaders);
+    skySunShaders["sky_rendering_1"]->AddUniform("transmittance_texture", ParameterType::INT);
+    skySunShaders["sky_rendering_1"]->AddUniform("scattering_texture", ParameterType::INT);
+    skySunShaders["sky_rendering_1"]->AddUniform("single_mie_scattering_texture", ParameterType::INT);
+    skySunShaders["sky_rendering_1"]->AddUniform("eyePos", ParameterType::VEC3);
+    skySunShaders["sky_rendering_1"]->AddUniform("sunDir", ParameterType::VEC3);
+    skySunShaders["sky_rendering_1"]->AddUniform("invView", ParameterType::MAT4);
+    skySunShaders["sky_rendering_1"]->AddUniform("invProj", ParameterType::MAT4);
+    skySunShaders["sky_rendering_1"]->AddUniform("whitePoint", ParameterType::VEC3);
+    skySunShaders["sky_rendering_1"]->AddUniform("cosSunSize", ParameterType::FLOAT);
+	skySunShaders["sky_rendering_1"]->AddUniform("bottomRadius", ParameterType::FLOAT);
+	skySunShaders["sky_rendering_1"]->AddUniform("groundAlbedo", ParameterType::FLOAT);
+    skySunShaders["sky_rendering_1"]->AddUniform("skyEmissivity", ParameterType::FLOAT);
+    skySunShaders["sky_rendering_1"]->AddUniform("airTemperature", ParameterType::FLOAT);
+
+    //NEW: VelocityField Vector field tracer glyphs
+    sources.clear();
+    sources.push_back(GLSLSource(GL_VERTEX_SHADER, "airVField.vert"));
+    sources.push_back(GLSLSource(GL_GEOMETRY_SHADER, "airVField.geom"));
+    sources.push_back(GLSLSource(GL_FRAGMENT_SHADER, "airVField.frag"));
+    skySunShaders["vectorfield"] = new GLSLShader(sources);
+    skySunShaders["vectorfield"]->AddUniform("VP", ParameterType::MAT4);
+    skySunShaders["vectorfield"]->AddUniform("vectorSize", ParameterType::FLOAT);
+    skySunShaders["vectorfield"]->AddUniform("velocityMax", ParameterType::FLOAT);
+    skySunShaders["vectorfield"]->AddUniform("eyePos", ParameterType::VEC3);
+    skySunShaders["vectorfield"]->AddUniform("fieldTex", ParameterType::INT);
+    skySunShaders["vectorfield"]->AddUniform("fieldBoxMin", ParameterType::VEC3);
+    skySunShaders["vectorfield"]->AddUniform("fieldBoxSize", ParameterType::VEC3);
+    skySunShaders["vectorfield"]->BindUniformBlock("AirCurrents", UBO_AIR_CURRENTS);
+    skySunShaders["vectorfield"]->BindShaderStorageBlock("Positions", SSBO_PARTICLE_POS);
+
+    //NEW: Compute shader that advects the air-current tracer particles
+    std::vector<GLSLSource> srcAdvect;
+    srcAdvect.push_back(GLSLSource(GL_COMPUTE_SHADER, "airCurrentParticle.comp"));
+    skySunShaders["advectParticles"] = new GLSLShader(srcAdvect);
+    skySunShaders["advectParticles"]->AddUniform("dt", ParameterType::FLOAT);
+    skySunShaders["advectParticles"]->AddUniform("numParticles", ParameterType::UINT);
+    skySunShaders["advectParticles"]->AddUniform("eyePos", ParameterType::VEC3);
+    skySunShaders["advectParticles"]->AddUniform("R", ParameterType::FLOAT);
+    skySunShaders["advectParticles"]->AddUniform("fieldTex", ParameterType::INT);
+    skySunShaders["advectParticles"]->AddUniform("fieldBoxMin", ParameterType::VEC3);
+    skySunShaders["advectParticles"]->AddUniform("fieldBoxSize", ParameterType::VEC3);
+    skySunShaders["advectParticles"]->BindUniformBlock("AirCurrents", UBO_AIR_CURRENTS);
+    skySunShaders["advectParticles"]->BindShaderStorageBlock("Positions", SSBO_PARTICLE_POS);
 
     //Initialize shadows
     sunShadowFrustum = new ViewFrustum[sunShadowmapSplits];
@@ -199,6 +230,16 @@ OpenGLAtmosphere::OpenGLAtmosphere(const std::string& modelFilename, RenderQuali
         OpenGLState::BindTexture(TEX_SUN_DEPTH, GL_TEXTURE_2D_ARRAY, sunShadowmapArray);
         glBindSampler(TEX_SUN_DEPTH, sunDepthSampler);
     }
+
+    //NEW: Advected velocity-field arrows (keepSign -1 => particles live in the air, z < 0)
+    airCurrentsUBOData.numCurrents = 0;
+    airCurrentsUBOData.gravity = glm::vec3(0.f);
+    glGenBuffers(1, &airCurrentsUBO);
+    glBindBuffer(GL_UNIFORM_BUFFER, airCurrentsUBO);
+    glBufferData(GL_UNIFORM_BUFFER, sizeof(AirCurrentsUBO), NULL, GL_DYNAMIC_DRAW);
+    glBindBufferRange(GL_UNIFORM_BUFFER, UBO_AIR_CURRENTS, airCurrentsUBO, 0, sizeof(AirCurrentsUBO));
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    airTracers = new OpenGLCurrentTracers(4096, 10.f, -1.f);
 }
 
 OpenGLAtmosphere::~OpenGLAtmosphere()
@@ -206,8 +247,8 @@ OpenGLAtmosphere::~OpenGLAtmosphere()
     for(unsigned short i=0; i< AtmosphereTextures::TEXTURE_COUNT; ++i)
         if(textures[i] != 0) glDeleteTextures(1, &textures[i]);
 
-    if(skySunShaders[0] != nullptr) delete skySunShaders[0];
-    if(skySunShaders[1] != nullptr) delete skySunShaders[1];
+    if(skySunShaders["sky_rendering_0"] != nullptr) delete skySunShaders["sky_rendering_0"];
+    if(skySunShaders["sky_rendering_1"] != nullptr) delete skySunShaders["sky_rendering_1"];
     //if(atmosphereAPI > 0) glDeleteShader(atmosphereAPI);
 
     if(sunShadowmapArray != 0) glDeleteTextures(1, &sunShadowmapArray);
@@ -223,6 +264,53 @@ OpenGLAtmosphere::~OpenGLAtmosphere()
         glDeleteFramebuffers(1, &sunShadowFBO);
         delete sunShadowmapShader;
     }
+
+    if(airTracers != nullptr) delete airTracers;
+}
+
+void OpenGLAtmosphere::Simulate(GLfloat dt)
+{	
+    //Update currents uniform buffer
+    glBindBuffer(GL_UNIFORM_BUFFER, airCurrentsUBO);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(AirCurrentsUBO), &airCurrentsUBOData);
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+}
+
+void OpenGLAtmosphere::UpdateAirParticles(OpenGLView* view, GLfloat dt, Atmosphere* atm)
+{
+    const int N = 32;
+    glm::vec3 eye = view->GetEyePosition();
+    glm::vec3 boxMin = eye - glm::vec3(10.f);
+    glm::vec3 boxSize = glm::vec3(20.f);
+    
+    std::vector<glm::vec4> grid(N*N*N);
+    #pragma omp parallel for collapse(2)
+    for(int z=0; z<N; ++z)
+      for(int y=0; y<N; ++y)
+        for(int x=0; x<N; ++x)
+        {
+            glm::vec3 t  = (glm::vec3(x,y,z) + 0.5f) / (float)N;
+            glm::vec3 wp = boxMin + t * boxSize;
+            glm::vec3 v  = atm->GetFluidVelocity(wp);          //glm overload — base + turbulence
+            grid[x + N*(y + N*z)] = glm::vec4(v, glm::length(v));
+        }
+
+    airTracers->UploadField(grid, N, boxMin, boxSize);          //upload (render thread, correct)
+    airTracers->Update(view, dt, skySunShaders["advectParticles"]);
+}
+
+void OpenGLAtmosphere::SetFog(glm::vec3 color, GLfloat density)
+{
+    fogColor = color;
+    fogDensity = density;
+}
+glm::vec3 OpenGLAtmosphere::GetFogColor()
+{
+    return fogColor;
+}
+GLfloat OpenGLAtmosphere::GetFogDensity()
+{
+    return fogDensity;
 }
 
 void OpenGLAtmosphere::SetSunPosition(float azimuthDeg, float elevationDeg)
@@ -343,18 +431,18 @@ void OpenGLAtmosphere::DrawSkyAndSun(const OpenGLView* view)
 	invViewMatrix[3].z = eyePos.z;
     glm::mat4 invProjectionMatrix = glm::inverse(view->GetProjectionMatrix());
 
-    skySunShaders[0]->Use();
-	skySunShaders[0]->SetUniform("bottomRadius", sunSkyUBOData.planetRadiusInUnits);
-	skySunShaders[0]->SetUniform("groundAlbedo", 0.7f);
-    skySunShaders[0]->SetUniform("transmittance_texture", TEX_ATM_TRANSMITTANCE);
-    skySunShaders[0]->SetUniform("scattering_texture", TEX_ATM_SCATTERING);
-    skySunShaders[0]->SetUniform("single_mie_scattering_texture", TEX_ATM_SCATTERING);
-    skySunShaders[0]->SetUniform("eyePos", eyePos);
-    skySunShaders[0]->SetUniform("sunDir", GetSunDirection());
-    skySunShaders[0]->SetUniform("invProj", invProjectionMatrix);
-    skySunShaders[0]->SetUniform("invView", invViewMatrix);
-    skySunShaders[0]->SetUniform("whitePoint", sunSkyUBOData.whitePoint);
-    skySunShaders[0]->SetUniform("cosSunSize", (GLfloat)cosf(0.00935f/2.f));
+    skySunShaders["sky_rendering_0"]->Use();
+	skySunShaders["sky_rendering_0"]->SetUniform("bottomRadius", sunSkyUBOData.planetRadiusInUnits);
+	skySunShaders["sky_rendering_0"]->SetUniform("groundAlbedo", 0.7f);
+    skySunShaders["sky_rendering_0"]->SetUniform("transmittance_texture", TEX_ATM_TRANSMITTANCE);
+    skySunShaders["sky_rendering_0"]->SetUniform("scattering_texture", TEX_ATM_SCATTERING);
+    skySunShaders["sky_rendering_0"]->SetUniform("single_mie_scattering_texture", TEX_ATM_SCATTERING);
+    skySunShaders["sky_rendering_0"]->SetUniform("eyePos", eyePos);
+    skySunShaders["sky_rendering_0"]->SetUniform("sunDir", GetSunDirection());
+    skySunShaders["sky_rendering_0"]->SetUniform("invProj", invProjectionMatrix);
+    skySunShaders["sky_rendering_0"]->SetUniform("invView", invViewMatrix);
+    skySunShaders["sky_rendering_0"]->SetUniform("whitePoint", sunSkyUBOData.whitePoint);
+    skySunShaders["sky_rendering_0"]->SetUniform("cosSunSize", (GLfloat)cosf(0.00935f/2.f));
     ((GraphicalSimulationApp*)SimulationApp::getApp())->getGLPipeline()->getContent()->DrawSAQ();
     OpenGLState::UseProgram(0);
 }
@@ -369,20 +457,20 @@ void OpenGLAtmosphere::DrawSkyAndSunTemperature(const OpenGLView* view)
 	invViewMatrix[3].z = eyePos.z;
     glm::mat4 invProjectionMatrix = glm::inverse(view->GetProjectionMatrix());
 
-    skySunShaders[1]->Use();
-	skySunShaders[1]->SetUniform("bottomRadius", sunSkyUBOData.planetRadiusInUnits);
-	skySunShaders[1]->SetUniform("groundAlbedo", 0.7f);
-    skySunShaders[1]->SetUniform("transmittance_texture", TEX_ATM_TRANSMITTANCE);
-    skySunShaders[1]->SetUniform("scattering_texture", TEX_ATM_SCATTERING);
-    skySunShaders[1]->SetUniform("single_mie_scattering_texture", TEX_ATM_SCATTERING);
-    skySunShaders[1]->SetUniform("eyePos", eyePos);
-    skySunShaders[1]->SetUniform("sunDir", GetSunDirection());
-    skySunShaders[1]->SetUniform("invProj", invProjectionMatrix);
-    skySunShaders[1]->SetUniform("invView", invViewMatrix);
-    skySunShaders[1]->SetUniform("whitePoint", sunSkyUBOData.whitePoint);
-    skySunShaders[1]->SetUniform("cosSunSize", (GLfloat)cosf(0.00935f/2.f));
-    skySunShaders[1]->SetUniform("skyEmissivity", sunSkyUBOData.skyEmissivity);
-    skySunShaders[1]->SetUniform("airTemperature", airTemperature);
+    skySunShaders["sky_rendering_1"]->Use();
+	skySunShaders["sky_rendering_1"]->SetUniform("bottomRadius", sunSkyUBOData.planetRadiusInUnits);
+	skySunShaders["sky_rendering_1"]->SetUniform("groundAlbedo", 0.7f);
+    skySunShaders["sky_rendering_1"]->SetUniform("transmittance_texture", TEX_ATM_TRANSMITTANCE);
+    skySunShaders["sky_rendering_1"]->SetUniform("scattering_texture", TEX_ATM_SCATTERING);
+    skySunShaders["sky_rendering_1"]->SetUniform("single_mie_scattering_texture", TEX_ATM_SCATTERING);
+    skySunShaders["sky_rendering_1"]->SetUniform("eyePos", eyePos);
+    skySunShaders["sky_rendering_1"]->SetUniform("sunDir", GetSunDirection());
+    skySunShaders["sky_rendering_1"]->SetUniform("invProj", invProjectionMatrix);
+    skySunShaders["sky_rendering_1"]->SetUniform("invView", invViewMatrix);
+    skySunShaders["sky_rendering_1"]->SetUniform("whitePoint", sunSkyUBOData.whitePoint);
+    skySunShaders["sky_rendering_1"]->SetUniform("cosSunSize", (GLfloat)cosf(0.00935f/2.f));
+    skySunShaders["sky_rendering_1"]->SetUniform("skyEmissivity", sunSkyUBOData.skyEmissivity);
+    skySunShaders["sky_rendering_1"]->SetUniform("airTemperature", airTemperature);
 
     ((GraphicalSimulationApp*)SimulationApp::getApp())->getGLPipeline()->getContent()->DrawSAQ();
     OpenGLState::UseProgram(0);
@@ -648,6 +736,16 @@ void OpenGLAtmosphere::Init()
 GLuint OpenGLAtmosphere::getAtmosphereAPI()
 {
     return atmosphereAPI;
+}
+
+void OpenGLAtmosphere::DrawVelocityField(OpenGLView* view, GLfloat velocityMax)
+{
+    airTracers->Draw(view, velocityMax, skySunShaders["vectorfield"]);
+}
+
+void OpenGLAtmosphere::UpdateAirCurrentsData(const AirCurrentsUBO& data)
+{
+    memcpy(&airCurrentsUBOData, &data, sizeof(AirCurrentsUBO));
 }
 
 }

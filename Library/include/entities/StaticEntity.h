@@ -58,6 +58,12 @@ namespace sf
          \param sm a pointer to the simulation manager
          */
         void AddToSimulation(SimulationManager* sm);
+
+        //! NEW: method used to remove the static entity from the simulation.
+        /*!
+         \param sm a pointer to the simulation manager
+         */
+        void RemoveFromSimulation(SimulationManager* sm);
         
         //! A method used to add the static entity to the simulation.
         /*!

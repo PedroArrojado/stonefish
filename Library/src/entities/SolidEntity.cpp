@@ -202,6 +202,18 @@ int SolidEntity::getPhysicalObject() const
     return phyObjectId;
 }
 
+//NEW: Setter for the free-surface drag coefficients (FLOATING bodies only).
+void SolidEntity::SetSurfaceDragParams(const SurfaceDragParams& sdp)
+{
+    surfDrag = sdp;
+}
+
+//NEW: Getter for the free-surface drag coefficients.
+const SurfaceDragParams& SolidEntity::getSurfaceDragParams() const
+{
+    return surfDrag;
+}
+
 bool SolidEntity::isBuoyant() const
 {
     return (phy.mode == PhysicsMode::SUBMERGED || phy.mode == PhysicsMode::FLOATING) && phy.buoyancy;
@@ -1286,6 +1298,357 @@ void SolidEntity::CorrectHydrodynamicForces(Ocean* ocn, Vector3& _Fdq, Vector3& 
     _Tdf = ocn->getLiquid().density * Tdfc * _Tdf; //rho*S*v from viscous drag equation
 }
 
+
+// NEW: =====================================================================
+// Free-surface hydrodynamics, asv_wave_sim / Kerner style.
+//
+// Applied to bodies whose physics mode is FLOATING. Submerged bodies keep the
+// original formulation unchanged; the two are deliberately separate because
+// they are calibrated differently, and the coefficients of one are not
+// interchangeable with the other.
+//
+// Buoyancy is obtained by integrating the hydrostatic pressure in closed form
+// over the submerged remainder of each face. Over a submerged triangle the
+// pressure p = rho g d is linear, so both the resultant and its line of action
+// integrate exactly: the triangle is split at its middle vertex into an upper
+// and a lower triangle with horizontal bases, and each contributes
+//
+//      int d dA = A (d1 + d2 + d3)/3
+//
+// with the centre of pressure at a known parameter along the median from apex
+// to base midpoint. Applying the resultant at the geometric centroid instead is
+// exact only as the face size vanishes, and the offset is largest for the faces
+// nearest the waterline -- which are precisely the ones that set a hull's
+// restoring moment.
+// ==========================================================================
+
+//! NEW: One submerged sub-triangle produced by clipping a face at the waterline.
+struct SfSubTri
+{
+    glm::vec3 v[3];      //!< Vertices, world frame.
+    GLfloat   d[3];      //!< Vertex depths, all >= 0.
+    glm::vec3 normal;    //!< Outward unit normal of the parent face.
+    glm::vec3 centroid;  //!< Sub-triangle centroid, world frame.
+    glm::vec3 xr;        //!< centroid - CG.
+    GLfloat   area;
+};
+
+//! NEW: Closed-form hydrostatic pressure integral over a submerged triangle.
+/*!
+ \param cop receives the true centre of pressure
+ \return the integral of depth over the triangle's area [m^3]
+ */
+static GLfloat SfTriPressureIntegral(const glm::vec3& pa, const glm::vec3& pb, const glm::vec3& pc,
+                                     GLfloat da, GLfloat db, GLfloat dc, glm::vec3& cop)
+{
+    const GLfloat tol = 1e-10f;
+    glm::vec3 v[3] = {pa, pb, pc};
+    GLfloat d[3] = {da, db, dc};
+
+    //Sort by depth: v[0] shallowest, v[2] deepest
+    if(d[0] > d[1]) { std::swap(v[0], v[1]); std::swap(d[0], d[1]); }
+    if(d[1] > d[2]) { std::swap(v[1], v[2]); std::swap(d[1], d[2]); }
+    if(d[0] > d[1]) { std::swap(v[0], v[1]); std::swap(d[0], d[1]); }
+
+    const glm::vec3& vH = v[0]; const GLfloat dH = d[0];
+    const glm::vec3& vM = v[1]; const GLfloat dM = d[1];
+    const glm::vec3& vL = v[2]; const GLfloat dL = d[2];
+
+    //Point on the H-L edge at the middle vertex's depth: gives two triangles
+    //with horizontal bases.
+    GLfloat span = dL - dH;
+    glm::vec3 vD = (span > tol) ? vH + (vL - vH) * ((dM - dH)/span)
+                                : 0.5f * (vH + vL);
+    glm::vec3 vB = 0.5f * (vM + vD); //Base midpoint, shared by both
+
+    GLfloat fU = 0.f, fL = 0.f;
+    glm::vec3 cpU = vB, cpL = vB;
+
+    GLfloat areaU = 0.5f * glm::length(glm::cross(vM - vH, vD - vH));
+    if(areaU > tol)
+    {
+        fU = areaU * (dH + 2.f*dM) / 3.f;
+        GLfloat h = dM - dH, z0 = dH;
+        GLfloat div = 6.f*z0 + 4.f*h;
+        GLfloat tc = (fabsf(div) > tol) ? (4.f*z0 + 3.f*h)/div : 2.f/3.f;
+        cpU = vH + (vB - vH) * tc;
+    }
+
+    GLfloat areaL = 0.5f * glm::length(glm::cross(vM - vL, vD - vL));
+    if(areaL > tol)
+    {
+        fL = areaL * (dL + 2.f*dM) / 3.f;
+        GLfloat h = dL - dM, z0 = dM;
+        GLfloat div = 6.f*z0 + 2.f*h;
+        GLfloat tc = (fabsf(div) > tol) ? (2.f*z0 + h)/div : 1.f/3.f;
+        cpL = vB + (vL - vB) * tc;
+    }
+
+    GLfloat tot = fU + fL;
+    cop = (tot > tol) ? cpL + (cpU - cpL) * (fU/tot) : (vH + vM + vL)/3.f;
+    return tot;
+}
+
+//! NEW: Contract a per-axis coefficient triple against a direction in the origin frame.
+static inline GLfloat SfAniso(const glm::vec3& dirOrigin, const Vector3& C)
+{
+    //d_i^2 sums to exactly 1 for a unit direction, so this is a convex
+    //combination: motion along an axis takes that axis' coefficient and the
+    //result can never leave the range of the three inputs.
+    return dirOrigin.x*dirOrigin.x*(GLfloat)C.getX()
+         + dirOrigin.y*dirOrigin.y*(GLfloat)C.getY()
+         + dirOrigin.z*dirOrigin.z*(GLfloat)C.getZ();
+}
+
+void SolidEntity::ComputeHydrodynamicForcesSurfaceWaveSim(const HydrodynamicsSettings& settings, const Mesh* mesh, Ocean* ocn,
+    const Transform& T_CG, const Transform& T_C, const Transform& T_O,
+    const Vector3& _v, const Vector3& _omega, Vector3& _Fb, Vector3& _Tb,
+    Vector3& _Fdq, Vector3& _Tdq, Vector3& _Fdf, Vector3& _Tdf,
+    Scalar& _Swet, Scalar& _Vsub, Renderable& debug,
+    const SurfaceDragParams& sdp, Scalar totalVolume)
+{
+    _Fb.setZero(); _Tb.setZero();
+    _Fdq.setZero(); _Tdq.setZero();
+    _Fdf.setZero(); _Tdf.setZero();
+    _Swet = Scalar(0); _Vsub = Scalar(0);
+    if(mesh == nullptr) return;
+
+    glm::mat4 TCG = glMatrixFromTransform(T_CG);
+    glm::mat4 TC  = glMatrixFromTransform(T_C);
+    glm::vec3 v     = glVectorFromVector(_v);
+    glm::vec3 omega = glVectorFromVector(_omega);
+    glm::vec3 p     = glm::vec3(TCG[3]);
+
+    //World -> origin rotation, for the per-axis damping lookup.
+    Matrix3 R = T_O.getBasis().inverse();
+    glm::mat3 toOrigin((GLfloat)R[0][0], (GLfloat)R[1][0], (GLfloat)R[2][0],
+                       (GLfloat)R[0][1], (GLfloat)R[1][1], (GLfloat)R[2][1],
+                       (GLfloat)R[0][2], (GLfloat)R[1][2], (GLfloat)R[2][2]);
+
+    const GLfloat rho = (GLfloat)ocn->getLiquid().density;
+    //Liquid::viscosity is the DYNAMIC viscosity [Pa s]; the Reynolds number
+    //needs the KINEMATIC value. Passing the dynamic one makes Re a factor of
+    //~1000 too small, pinning the ITTC line at its low-Re end.
+    const GLfloat nu = (GLfloat)(ocn->getLiquid().viscosity / ocn->getLiquid().density);
+
+    // ---- Step 1/2: clip every face at the waterline -----------------------
+    std::vector<SfSubTri> subs;
+    subs.reserve(mesh->faces.size());
+
+    auto emit = [&](const glm::vec3& a, const glm::vec3& b, const glm::vec3& c,
+                    GLfloat da, GLfloat db, GLfloat dc, const glm::vec3& n)
+    {
+        glm::vec3 cr = glm::cross(b - a, c - a);
+        GLfloat l2 = glm::length2(cr);
+        if(l2 < 1e-14f) return;
+        SfSubTri st;
+        st.v[0] = a; st.v[1] = b; st.v[2] = c;
+        st.d[0] = da; st.d[1] = db; st.d[2] = dc;
+        st.normal = n;
+        st.area = glm::sqrt(l2) / 2.f;
+        st.centroid = (a + b + c) / 3.f;
+        st.xr = st.centroid - p;
+        subs.push_back(st);
+    };
+
+    for(size_t i=0; i<mesh->faces.size(); ++i)
+    {
+        glm::vec3 p1 = glm::vec3(TC * glm::vec4(mesh->getVertexPos(i, 0), 1.f));
+        glm::vec3 p2 = glm::vec3(TC * glm::vec4(mesh->getVertexPos(i, 1), 1.f));
+        glm::vec3 p3 = glm::vec3(TC * glm::vec4(mesh->getVertexPos(i, 2), 1.f));
+
+        GLfloat d1 = ocn->GetDepth(p1);
+        GLfloat d2 = ocn->GetDepth(p2);
+        GLfloat d3 = ocn->GetDepth(p3);
+        if(d1 < 0.f && d2 < 0.f && d3 < 0.f) continue;
+
+        glm::vec3 fn = glm::cross(p2-p1, p3-p1);
+        GLfloat l2 = glm::length2(fn);
+        if(l2 < 1e-12f) continue;
+        glm::vec3 n = fn / glm::sqrt(l2);
+
+        if(d1 >= 0.f && d2 >= 0.f && d3 >= 0.f)      //fully submerged face
+        {
+            emit(p1, p2, p3, d1, d2, d3, n);
+        }
+        else if(d1 >= 0.f && d2 >= 0.f)              //one vertex dry -> quad
+        {
+            glm::vec3 a = p1 + (p3-p1) * (d1/(d1 + fabsf(d3)));
+            glm::vec3 b = p2 + (p3-p2) * (d2/(d2 + fabsf(d3)));
+            //Triangulated rather than treated as one polygon: evaluating a
+            //quadrilateral at the mean of its four vertices, two of which lie
+            //on the waterline, divides the wet depth by four where the correct
+            //area-weighted mean over a triangle divides by three.
+            emit(p1, p2, b, d1, d2, 0.f, n);
+            emit(p1, b, a, d1, 0.f, 0.f, n);
+        }
+        else if(d1 >= 0.f && d3 >= 0.f)
+        {
+            glm::vec3 a = p1 + (p2-p1) * (d1/(d1 + fabsf(d2)));
+            glm::vec3 b = p3 + (p2-p3) * (d3/(d3 + fabsf(d2)));
+            emit(p1, a, b, d1, 0.f, 0.f, n);
+            emit(p1, b, p3, d1, 0.f, d3, n);
+        }
+        else if(d2 >= 0.f && d3 >= 0.f)
+        {
+            glm::vec3 a = p2 + (p1-p2) * (d2/(d2 + fabsf(d1)));
+            glm::vec3 b = p3 + (p1-p3) * (d3/(d3 + fabsf(d1)));
+            emit(a, p2, p3, 0.f, d2, d3, n);
+            emit(a, p3, b, 0.f, d3, 0.f, n);
+        }
+        else if(d1 >= 0.f)                            //two vertices dry -> tri
+        {
+            glm::vec3 a = p1 + (p2-p1) * (d1/(d1 + fabsf(d2)));
+            glm::vec3 b = p1 + (p3-p1) * (d1/(d1 + fabsf(d3)));
+            emit(p1, a, b, d1, 0.f, 0.f, n);
+        }
+        else if(d2 >= 0.f)
+        {
+            glm::vec3 a = p2 + (p1-p2) * (d2/(d2 + fabsf(d1)));
+            glm::vec3 b = p2 + (p3-p2) * (d2/(d2 + fabsf(d3)));
+            emit(a, p2, b, 0.f, d2, 0.f, n);
+        }
+        else
+        {
+            glm::vec3 a = p3 + (p1-p3) * (d3/(d3 + fabsf(d1)));
+            glm::vec3 b = p3 + (p2-p3) * (d3/(d3 + fabsf(d2)));
+            emit(a, b, p3, 0.f, 0.f, d3, n);
+        }
+    }
+
+    if(subs.empty()) return;
+
+    auto points = debug.getDataAsPoints();
+
+    // ---- Step 3: buoyancy by closed-form pressure integration -------------
+    //NEW: The pressure integral is accumulated WITHOUT gravity, then scaled by
+    //     rho * g.z exactly as the original surface path does. Folding in a
+    //     hardcoded +9.81 would give the wrong sign under a z-up convention;
+    //     taking it from the simulation makes the expression correct either way.
+    Vector3 gvec = SimulationApp::getApp()->getSimulationManager()->getGravity();
+    const GLfloat gz = (GLfloat)gvec.getZ();
+    const GLfloat gmag = (GLfloat)gvec.length();
+
+    glm::vec3 Fb(0.f), Tb(0.f);
+    GLfloat Swet = 0.f;
+    for(size_t i=0; i<subs.size(); ++i)
+    {
+        const SfSubTri& st = subs[i];
+        glm::vec3 cop;
+        GLfloat I = SfTriPressureIntegral(st.v[0], st.v[1], st.v[2],
+                                          st.d[0], st.d[1], st.d[2], cop);
+        glm::vec3 Fbi = -st.normal * I;
+        Fb += Fbi;
+        Tb += glm::cross(cop - p, Fbi);
+        Swet += st.area;
+
+        if(points != nullptr)
+        {
+            points->push_back(st.v[0]); points->push_back(st.v[1]);
+            points->push_back(st.v[1]); points->push_back(st.v[2]);
+            points->push_back(st.v[2]); points->push_back(st.v[0]);
+        }
+    }
+    Fb *= rho * gz;
+    Tb *= rho * gz;
+    if(settings.reallisticBuoyancy)
+    {
+        _Fb = Vector3(Fb.x, Fb.y, Fb.z);
+        _Tb = Vector3(Tb.x, Tb.y, Tb.z);
+    }
+
+    //NEW: Submerged volume from the magnitude of the buoyant force rather than
+    //     from -sum(n_z * I). The latter is the divergence-theorem form for a
+    //     z-UP convention and returns a NEGATIVE volume under Stonefish's z-down
+    //     frame, which flips the sign of rs below and turns the global damping
+    //     term into an amplifier -- a body released in roll then grows instead
+    //     of settling. |Fb| / (rho g) is exact and independent of the axis
+    //     convention, and costs nothing since Fb is already computed.
+    GLfloat Vsub = (gmag > 1e-9f) ? glm::length(Fb) / (rho * gmag) : 0.f;
+    _Vsub = (Scalar)Vsub;
+    _Swet = (Scalar)Swet;
+
+    if(!settings.dampingForces) return;
+
+    // ---- Step 4/5/6: skin friction and pressure drag ----------------------
+    //ITTC-1957 correlation line. The characteristic length comes from the TOTAL
+    //body volume, not the instantaneous submerged volume, so cF does not
+    //oscillate with a passing wave.
+    GLfloat Lref = btMax(1e-3f, cbrtf(btMax((GLfloat)totalVolume, 1e-9f)) * 2.f);
+    GLfloat Rn = btMax(1000.f, glm::length(v) * Lref / btMax(nu, 1e-12f));
+    GLfloat ld = log10f(Rn) - 2.f;
+    GLfloat cF = 0.075f / (ld * ld);
+
+    glm::vec3 Fdq(0.f), Tdq(0.f), Fdf(0.f), Tdf(0.f);
+    for(size_t i=0; i<subs.size(); ++i)
+    {
+        const SfSubTri& st = subs[i];
+        //Velocity of the face relative to the surrounding fluid
+        glm::vec3 vp = (v + glm::cross(omega, st.xr)) - ocn->GetFluidVelocity(st.centroid);
+        GLfloat vpm = glm::length(vp);
+        if(vpm < 1e-9f) continue;
+        glm::vec3 vh = vp / vpm;
+        GLfloat cosT = glm::dot(vh, st.normal);
+
+        //Pressure on windward faces, suction on leeward ones. The leeward term
+        //is what resists a hull being lifted clear of the water, a case in
+        //which every wetted face is leeward.
+        GLfloat r = vpm / btMax((GLfloat)sdp.vRDrag, 1e-6f);
+        GLfloat mag;
+        if(cosT >= 0.f)
+            mag = ((GLfloat)sdp.cPDrag1 * r + (GLfloat)sdp.cPDrag2 * r * r)
+                * powf(cosT, (GLfloat)sdp.fPDrag);
+        else
+            mag = ((GLfloat)sdp.cSDrag1 * r + (GLfloat)sdp.cSDrag2 * r * r)
+                * powf(-cosT, (GLfloat)sdp.fSDrag);
+        //Density applied here rather than folded into the coefficients, so the
+        //same hull parameters remain valid across fluids.
+        glm::vec3 Fq = -vh * (0.5f * rho * st.area * mag);
+        Fdq += Fq;
+        Tdq += glm::cross(st.xr, Fq);
+
+        //Skin friction, opposing the tangential component
+        glm::vec3 vt = vp - st.normal * (vpm * cosT);
+        if(glm::length2(vt) > 1e-18f)
+        {
+            glm::vec3 Ff = -vt * (0.5f * rho * cF * st.area * vpm);
+            Fdf += Ff;
+            Tdf += glm::cross(st.xr, Ff);
+        }
+    }
+
+    // ---- Step 7: global body damping --------------------------------------
+    //Scaled by the fraction of the body that is submerged, so it fades out as
+    //the hull leaves the water. Per axis in the origin frame, and with its own
+    //rotational triple, which the original scalar formulation lacks.
+    //Submerged fraction, clamped: rs is a positive weight by construction now.
+    GLfloat rs = (totalVolume > Scalar(0))
+               ? btMin(1.f, btMax(0.f, Vsub / (GLfloat)totalVolume)) : 1.f;
+    GLfloat vmag = glm::length(v);
+    GLfloat wmag = glm::length(omega);
+    if(vmag > 1e-9f)
+    {
+        glm::vec3 dirO = glm::normalize(toOrigin * (v / vmag));
+        GLfloat c = rs * 0.5f * rho
+                  * (SfAniso(dirO, sdp.cDampL1) * (GLfloat)sdp.vRDrag
+                     + SfAniso(dirO, sdp.cDampL2) * vmag);
+        Fdf -= v * c;
+    }
+    if(wmag > 1e-9f)
+    {
+        glm::vec3 dirO = glm::normalize(toOrigin * (omega / wmag));
+        GLfloat c = rs * 0.5f * rho * Lref * Lref
+                  * (SfAniso(dirO, sdp.cDampR1) * (GLfloat)sdp.vRDrag
+                     + SfAniso(dirO, sdp.cDampR2) * wmag * Lref);
+        Tdf -= omega * c;
+    }
+
+    _Fdq = Vector3(Fdq.x, Fdq.y, Fdq.z);
+    _Tdq = Vector3(Tdq.x, Tdq.y, Tdq.z);
+    _Fdf = Vector3(Fdf.x, Fdf.y, Fdf.z);
+    _Tdf = Vector3(Tdf.x, Tdf.y, Tdf.z);
+}
+
 void SolidEntity::ComputeHydrodynamicForcesSurface(const HydrodynamicsSettings& settings, const Mesh* mesh, Ocean* ocn, const Transform& T_CG, const Transform& T_C,
                                             const Vector3& _v, const Vector3& _omega, Vector3& _Fb, Vector3& _Tb, Vector3& _Fdq, Vector3& _Tdq, Vector3& _Fdf, Vector3& _Tdf, 
                                             Scalar& _Swet, Scalar& _Vsub, Renderable& debug)
@@ -1824,29 +2187,56 @@ void SolidEntity::ComputeHydrodynamicForces(HydrodynamicsSettings settings, Ocea
     Vector3 v = getLinearVelocity();
     Vector3 omega = getAngularVelocity();
     
-    //Check if fully submerged --> simplifies buoyancy calculation
-    if(bf == BodyFluidPosition::INSIDE)
-    {
-        //Compute buoyancy based on CB position
-        if(isBuoyant())
-        {
-            Fb = -volume*ocn->getLiquid().density * SimulationApp::getApp()->getSimulationManager()->getGravity();
-            Tb = (getCGTransform() * P_CB - getCGTransform().getOrigin()).cross(Fb);
-        }
-        
-        if(settings.dampingForces)
-            ComputeHydrodynamicForcesSubmerged(getPhysicsMesh(), ocn, getCGTransform(), getCTransform(), v, omega, Fdq, Tdq, Fdf, Tdf);
-
-        Swet = surface;
-    }
-    else //CROSSING_FLUID_SURFACE
+    //NEW: The two models are dispatched on the body's PHYSICS MODE rather than
+    //     on its instantaneous position relative to the free surface.
+    //
+    //     FLOATING  -> the asv_wave_sim style model, which integrates the
+    //                  hydrostatic pressure in closed form over the clipped
+    //                  faces and uses the Kerner windward/leeward drag with an
+    //                  ITTC-1957 friction line. It applies density and its own
+    //                  coefficients internally, so CorrectHydrodynamicForces()
+    //                  must not follow it.
+    //     SUBMERGED -> the original formulation, unchanged, including the
+    //                  correction pass.
+    //
+    //     They are kept separate because they are calibrated differently and
+    //     their coefficients are not interchangeable. A FLOATING body needs no
+    //     special case when a wave closes over it: the clipper simply returns
+    //     every face whole.
+    if(phy.mode == PhysicsMode::FLOATING)
     {
         if(!isBuoyant()) settings.reallisticBuoyancy = false;
-        ComputeHydrodynamicForcesSurface(settings, getPhysicsMesh(), ocn, getCGTransform(), getCTransform(), v, omega, Fb, Tb, Fdq, Tdq, Fdf, Tdf, Swet, Vsub, submerged);
+        ComputeHydrodynamicForcesSurfaceWaveSim(settings, getPhysicsMesh(), ocn,
+            getCGTransform(), getCTransform(), getOTransform(), v, omega,
+            Fb, Tb, Fdq, Tdq, Fdf, Tdf, Swet, Vsub, submerged, surfDrag, volume);
     }
-    
-    if(settings.dampingForces)
-        CorrectHydrodynamicForces(ocn, Fdq, Tdq, Fdf, Tdf, fdCd, fdCf, getOTransform());
+    else //PhysicsMode::SUBMERGED, original formulation
+    {
+        //Check if fully submerged --> simplifies buoyancy calculation
+        if(bf == BodyFluidPosition::INSIDE)
+        {
+            //Compute buoyancy based on CB position
+            if(isBuoyant())
+            {
+                Fb = -volume*ocn->getLiquid().density * SimulationApp::getApp()->getSimulationManager()->getGravity();
+                Tb = (getCGTransform() * P_CB - getCGTransform().getOrigin()).cross(Fb);
+            }
+
+            if(settings.dampingForces)
+                ComputeHydrodynamicForcesSubmerged(getPhysicsMesh(), ocn, getCGTransform(), getCTransform(), v, omega, Fdq, Tdq, Fdf, Tdf);
+
+            Swet = surface;
+            Vsub = volume;
+        }
+        else //CROSSING_FLUID_SURFACE
+        {
+            if(!isBuoyant()) settings.reallisticBuoyancy = false;
+            ComputeHydrodynamicForcesSurface(settings, getPhysicsMesh(), ocn, getCGTransform(), getCTransform(), v, omega, Fb, Tb, Fdq, Tdq, Fdf, Tdf, Swet, Vsub, submerged);
+        }
+
+        if(settings.dampingForces)
+            CorrectHydrodynamicForces(ocn, Fdq, Tdq, Fdf, Tdf, fdCd, fdCf, getOTransform());
+    }
 }
 
 void SolidEntity::ComputeAerodynamicForces(Atmosphere* atm)
@@ -1910,7 +2300,12 @@ void SolidEntity::ComputeAerodynamicForces(const Mesh* mesh, Atmosphere* atm, co
         
         if(glm::dot(fn1, vn) < -1e-12f)
         {
-            glm::vec3 quadratic = vn * vn.length() * A;
+            //NEW: glm::vec3::length() returns the number of components, i.e. 3,
+            //     not the magnitude of the vector -- glm::length() does that.
+            //     The original expression therefore evaluated to vn * 3 * A,
+            //     making aerodynamic drag linear in speed instead of quadratic
+            //     and scaling it by a constant 3.
+            glm::vec3 quadratic = vn * glm::length(vn) * A;
             //Accumulate
             Fda += quadratic;
             Tda += glm::cross(fc - p, quadratic);

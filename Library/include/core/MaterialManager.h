@@ -55,6 +55,10 @@ namespace sf
             viscosity = Scalar(0);
             IOR = Scalar(1);
         }
+        void setDensity(Scalar new_dens)
+        {
+            density = new_dens;
+        }
     };
     
     //! A strcture holding friction coefficients.

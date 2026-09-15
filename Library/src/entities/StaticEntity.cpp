@@ -160,6 +160,13 @@ void StaticEntity::AddToSimulation(SimulationManager* sm, const Transform& origi
     }
 }
 
+void StaticEntity::RemoveFromSimulation(SimulationManager* sm)
+{
+    sm->getDynamicsWorld()->removeRigidBody(rigidBody);
+    rigidBody = nullptr;
+}
+
+
 //Static members
 void StaticEntity::GroupTransform(std::vector<StaticEntity*>& objects, const Transform& centre, const Transform& transform)
 {

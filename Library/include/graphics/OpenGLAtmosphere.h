@@ -28,6 +28,10 @@
 
 #include <functional>
 #include "graphics/OpenGLDataStructs.h"
+#include "graphics/OpenGLContent.h"
+#include <map>
+#include <random>
+#include <functional>
 
 namespace sf
 {
@@ -47,6 +51,14 @@ namespace sf
 	};
     #pragma pack(0)
 
+    //! NEW: A structure representing the air currents UBO.
+    struct AirCurrentsUBO
+    {
+        VelocityFieldUBO currents[MAX_AIR_CURRENTS]; //REMARK: type -> 0=uniform,1=jet,2=pipe,10=thruster
+        glm::vec3 gravity;
+        GLuint numCurrents;
+    };
+
     //! An enum definind id's of atmosphere textures.
     enum AtmosphereTextures
     {
@@ -59,6 +71,8 @@ namespace sf
     class GLSLShader;
     class OpenGLPipeline;
     class OpenGLView;
+    class OpenGLCurrentTracers;
+    class Atmosphere;
     
     //! A class implementing a physically correct atmosphere in OpenGL.
     class OpenGLAtmosphere
@@ -73,6 +87,15 @@ namespace sf
         
         //! A destructor.
         ~OpenGLAtmosphere();
+
+        //! NEW: A method that simulates wind propagation (velocity fields no longer static).
+		/*!
+		 \param dt time since last update
+		 */
+        virtual void Simulate(GLfloat dt);
+
+        //! NEW: A method that updates the air glyph particles.
+        void UpdateAirParticles(OpenGLView* view, GLfloat dt, Atmosphere* atm);
 
         //! A method loading the precomputed atmosphere model.
         /*!
@@ -101,6 +124,18 @@ namespace sf
         
         //! A method to setup a material shaders.
         void SetupMaterialShaders();
+
+        /*! NEW: A method to set atmospheric fog.
+            \param color the fog color (RGB)
+            \param fogDensity the fog density [0,1]
+        */
+        void SetFog(glm::vec3 color, GLfloat fogDensity);
+
+        //! NEW: A method to get atmospheric fog color.
+        glm::vec3 GetFogColor();
+
+        //! NEW: A method to get atmospheric fog density.
+        GLfloat GetFogDensity();
          
         //! A method to set position of the sun in the sky.
         /*!
@@ -163,6 +198,26 @@ namespace sf
         
         //! A static method returning the OpenGL id of the compiled API shader.
         static GLuint getAtmosphereAPI();
+
+        /*!
+         NEW: Method to draw the velocity field of the air currents with dynamic glyphs. 
+         \param view a pointer to the current view
+         \param velocityMax the maximum velocity to be used for color mapping
+        */
+        void DrawVelocityField(OpenGLView* view, GLfloat velocityMax);
+
+        /*!
+         NEW: Method to update the air currents data.
+         \param data a reference to the new air currents data
+        */
+        void UpdateAirCurrentsData(const AirCurrentsUBO& data);
+
+    protected:
+        AirCurrentsUBO airCurrentsUBOData;  // NEW: air currents UBO data
+        GLuint airCurrentsUBO;              // NEW: air currents UBO
+
+        //NEW: Advected velocity-field arrows ("lines as particles")
+        OpenGLCurrentTracers* airTracers;
         
     private:
         //Data
@@ -194,7 +249,11 @@ namespace sf
         GLfloat airTemperature;
         GLfloat airHumidity;
 
-        GLSLShader* skySunShaders[2];
+        //NEW: fog parameters
+        glm::vec3 fogColor; 
+        GLfloat fogDensity;
+
+        std::map<std::string, GLSLShader*> skySunShaders; // NEW: Restructured to a map (match openGLOcean)
         GLuint textures[AtmosphereTextures::TEXTURE_COUNT];
         static GLuint atmosphereAPI;
     };

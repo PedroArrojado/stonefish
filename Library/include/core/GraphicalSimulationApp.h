@@ -201,6 +201,12 @@ namespace sf
         uint8_t* joystickHats;
         SDL_Event mouseWasDown;
         
+        // NEW: Variables to enact dynamic structural changes
+        std::atomic<bool> structuralPauseRequested_{false};
+        std::atomic<bool> simParked_{false};
+        std::mutex pauseMutex_;
+        std::condition_variable pauseCv_;
+        
         IMGUI* gui;
         OpenGLPipeline* glPipeline;
         

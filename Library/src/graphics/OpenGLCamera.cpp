@@ -34,6 +34,11 @@
 #include "utils/SystemUtil.hpp"
 #include "entities/SolidEntity.h"
 
+// NEW: dependencies for fog:
+#include "entities/forcefields/Atmosphere.h"
+#include "graphics/OpenGLAtmosphere.h"
+#include "core/SimulationManager.h"
+
 namespace sf
 {
 
@@ -745,6 +750,15 @@ void OpenGLCamera::DrawLDR(GLuint destinationFBO, bool updated)
             tonemappingShaders[2]->SetUniform("texSource", TEX_POSTPROCESS1);
             tonemappingShaders[2]->SetUniform("texExposure", TEX_POSTPROCESS2);
             tonemappingShaders[2]->SetUniform("exposureComp", (GLfloat)powf(2.f,exposureComp));
+            
+            //NEW: Draw fog on camera
+            Atmosphere* atm = SimulationApp::getApp()->getSimulationManager()->getAtmosphere();
+            if(atm != NULL)
+            {
+                tonemappingShaders[2]->SetUniform("fogColor", atm->getOpenGLAtmosphere()->GetFogColor());
+                tonemappingShaders[2]->SetUniform("fogDensity", atm->getOpenGLAtmosphere()->GetFogDensity());
+            }
+
             ((GraphicalSimulationApp*)SimulationApp::getApp())->getGLPipeline()->getContent()->DrawSAQ();
             OpenGLState::BindFramebuffer(0);
 
@@ -771,6 +785,25 @@ void OpenGLCamera::DrawLDR(GLuint destinationFBO, bool updated)
             tonemappingShaders[2]->SetUniform("texSource", TEX_POSTPROCESS1);
             tonemappingShaders[2]->SetUniform("texExposure", TEX_POSTPROCESS2);
             tonemappingShaders[2]->SetUniform("exposureComp", (GLfloat)powf(2.f,exposureComp));
+            
+            //NEW: Draw fog on camera
+            Atmosphere* atm = SimulationApp::getApp()->getSimulationManager()->getAtmosphere();
+            if(atm != NULL)
+            {
+                tonemappingShaders[2]->SetUniform("fogColor", atm->getOpenGLAtmosphere()->GetFogColor());
+                tonemappingShaders[2]->SetUniform("fogDensity", atm->getOpenGLAtmosphere()->GetFogDensity());
+            }
+            // NEW: Debug fog:
+            // GLint locD, locC;
+            // locD = glGetUniformLocation(tonemappingShaders[2]->getProgramHandle(), "fogDensity");
+            // locC = glGetUniformLocation(tonemappingShaders[2]->getProgramHandle(), "texLinearDepth");
+            // cInfo("FOG dens=%.3f col=(%.2f,%.2f,%.2f) locDensity=%d locDepthSampler=%d",
+            //     atm->getOpenGLAtmosphere()->GetFogDensity(),
+            //     atm->getOpenGLAtmosphere()->GetFogColor().r,
+            //     atm->getOpenGLAtmosphere()->GetFogColor().g,
+            //     atm->getOpenGLAtmosphere()->GetFogColor().b,
+            //     locD, locC);
+
             ((GraphicalSimulationApp*)SimulationApp::getApp())->getGLPipeline()->getContent()->DrawSAQ();
             OpenGLState::BindFramebuffer(0);
             OpenGLState::UnbindTexture(TEX_POSTPROCESS2);   
@@ -815,7 +848,9 @@ void OpenGLCamera::Init(const RenderSettings& rSettings)
     tonemappingShaders[2]->AddUniform("texSource", ParameterType::INT);
     tonemappingShaders[2]->AddUniform("texExposure", ParameterType::INT);
     tonemappingShaders[2]->AddUniform("exposureComp", ParameterType::FLOAT);
-    
+    tonemappingShaders[2]->AddUniform("fogColor", ParameterType::VEC3);
+    tonemappingShaders[2]->AddUniform("fogDensity", ParameterType::FLOAT);
+
     /////Linear depth////
     depthLinearizeShader = new GLSLShader("depthLinearize.frag");
     depthLinearizeShader->AddUniform("texLogDepth", ParameterType::INT);

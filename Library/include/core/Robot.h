@@ -58,6 +58,14 @@ namespace sf
         
         //! A destructor.
         virtual ~Robot();
+
+        /*! 
+         NEW: Method to apply a wrench to the robot base link. 
+         The wrench is applied in the world frame.
+         \param force the force vector [N]
+         \param torque the torque vector [Nm]
+        */
+        void ApplyWrench(const Vector3& force, const Vector3& torque);
         
         //DYNAMICS
         //! A method used to define a list of rigid bodies constituting the mechanical part of the robot (dynamic tree).

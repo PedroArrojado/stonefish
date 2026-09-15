@@ -202,20 +202,35 @@ OpenGLOcean::OpenGLOcean(GLfloat size)
     
 	glDeleteShader(oceanOpticsFragment);
 
-    //Vector field
+    //NEW: Vector field
     sources.clear();
     sources.push_back(GLSLSource(GL_VERTEX_SHADER, "oceanVField.vert"));
     sources.push_back(GLSLSource(GL_GEOMETRY_SHADER, "oceanVField.geom"));
     sources.push_back(GLSLSource(GL_FRAGMENT_SHADER, "oceanVField.frag"));
     oceanShaders["vectorfield"] = new GLSLShader(sources);
-    oceanShaders["vectorfield"]->AddUniform("gridOrigin", ParameterType::IVEC3);
-    oceanShaders["vectorfield"]->AddUniform("gridSize", ParameterType::IVEC3);
-    oceanShaders["vectorfield"]->AddUniform("gridScale", ParameterType::FLOAT);
     oceanShaders["vectorfield"]->AddUniform("VP", ParameterType::MAT4);
     oceanShaders["vectorfield"]->AddUniform("vectorSize", ParameterType::FLOAT);
     oceanShaders["vectorfield"]->AddUniform("velocityMax", ParameterType::FLOAT);
     oceanShaders["vectorfield"]->AddUniform("eyePos", ParameterType::VEC3);
+    oceanShaders["vectorfield"]->AddUniform("fieldTex", ParameterType::INT);
+    oceanShaders["vectorfield"]->AddUniform("fieldBoxMin", ParameterType::VEC3);
+    oceanShaders["vectorfield"]->AddUniform("fieldBoxSize", ParameterType::VEC3);
     oceanShaders["vectorfield"]->BindUniformBlock("OceanCurrents", UBO_OCEAN_CURRENTS);
+    oceanShaders["vectorfield"]->BindShaderStorageBlock("Positions", SSBO_PARTICLE_POS);
+
+    //Compute shader that advects the ocean-current tracer particles
+    std::vector<GLSLSource> srcAdvect;
+    srcAdvect.push_back(GLSLSource(GL_COMPUTE_SHADER, "oceanCurrentParticle.comp"));
+    oceanShaders["advectParticles"] = new GLSLShader(srcAdvect);
+    oceanShaders["advectParticles"]->AddUniform("dt", ParameterType::FLOAT);
+    oceanShaders["advectParticles"]->AddUniform("numParticles", ParameterType::UINT);
+    oceanShaders["advectParticles"]->AddUniform("eyePos", ParameterType::VEC3);
+    oceanShaders["advectParticles"]->AddUniform("R", ParameterType::FLOAT);
+    oceanShaders["advectParticles"]->BindUniformBlock("OceanCurrents", UBO_OCEAN_CURRENTS);
+    oceanShaders["advectParticles"]->BindShaderStorageBlock("Positions", SSBO_PARTICLE_POS);
+    oceanShaders["advectParticles"]->AddUniform("fieldTex", ParameterType::INT);
+    oceanShaders["advectParticles"]->AddUniform("fieldBoxMin", ParameterType::VEC3);
+    oceanShaders["advectParticles"]->AddUniform("fieldBoxSize", ParameterType::VEC3);
 
     //Box around ocean (background)
     glm::vec3 v1(-0.5f, -0.5f, 0.5f);
@@ -312,6 +327,7 @@ OpenGLOcean::OpenGLOcean(GLfloat size)
     glBindBufferRange(GL_UNIFORM_BUFFER, UBO_OCEAN_CURRENTS, oceanCurrentsUBO, 0, sizeof(OceanCurrentsUBO));
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OceanCurrentsUBO), &oceanCurrentsUBOData);
     glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    oceanTracers = new OpenGLCurrentTracers(4096, 10.f, +1.f);
     
     //Load absorption coefficient table
 #ifdef EMBEDDED_RESOURCES
@@ -342,7 +358,8 @@ OpenGLOcean::~OpenGLOcean()
     
     if(params.spectrum12 != NULL) delete [] params.spectrum12;
     if(params.spectrum34 != NULL) delete [] params.spectrum34;
-
+    
+    delete oceanTracers;
     oceanParticles.clear();
 }
 
@@ -381,6 +398,20 @@ bool OpenGLOcean::getParticlesEnabled()
     return particlesEnabled;
 }
 
+//NEW: A method to remove particles from a specific OpenGLView and free its resources.
+void OpenGLOcean::RemoveParticles(OpenGLView* view)
+{
+    auto it = oceanParticles.find(view);
+    if (it != oceanParticles.end())
+    {
+        // Force cleanup of underlying resources (assuming it has a cleanup/destroy method)
+        if (it->second) {
+            it->second->Destroy(); // Or whatever method frees your GL resources
+        }
+        oceanParticles.erase(it); // Decrements ref count; destroys object if no other shared_ptrs exist
+    }
+}
+
 glm::vec3 OpenGLOcean::getLightAttenuation()
 {
     return lightAbsorption + getLightScattering();
@@ -395,6 +426,14 @@ GLfloat OpenGLOcean::ComputeWaveHeight(GLfloat x, GLfloat y)
 {
     return 0.f;
 }
+
+// NEW: method to compute wave height map for a set of points instead of a single point. 
+// Usefull for operations involving for loops and mutexes.
+std::vector<float> OpenGLOcean::ComputeWaveHeightMap(const std::vector<glm::vec3>& pts)
+{
+    return std::vector<float>(pts.size(), 0.f);
+}
+
 
 GLuint OpenGLOcean::getWaveTexture()
 {
@@ -411,9 +450,35 @@ void OpenGLOcean::UpdateOceanCurrentsData(const OceanCurrentsUBO& data)
     memcpy(&oceanCurrentsUBOData, &data, sizeof(OceanCurrentsUBO));
 }
 
+void OpenGLOcean::UpdateOceanParticles(OpenGLView* view, GLfloat dt, Ocean* ocn)
+{
+    const int N = 32;
+    glm::vec3 eye = view->GetEyePosition();
+    glm::vec3 boxMin = eye - glm::vec3(10.f);
+    glm::vec3 boxSize = glm::vec3(20.f);
+
+    std::vector<glm::vec4> grid(N*N*N);
+    #pragma omp parallel for collapse(2)
+    for(int z=0; z<N; ++z)
+      for(int y=0; y<N; ++y)
+        for(int x=0; x<N; ++x)
+        {
+            glm::vec3 t  = (glm::vec3(x,y,z) + 0.5f) / (float)N;
+            glm::vec3 wp = boxMin + t * boxSize;
+            glm::vec3 v  = ocn->GetFluidVelocity(wp);          //glm overload — base + turbulence
+            grid[x + N*(y + N*z)] = glm::vec4(v, glm::length(v));
+        }
+
+    oceanTracers->UploadField(grid, N, boxMin, boxSize);          //upload (render thread, correct)
+    oceanTracers->Update(view, dt, oceanShaders["advectParticles"]);
+}
+
 void OpenGLOcean::InitializeSimulation()
 {
-    GenerateWavesSpectrum();
+    if (params.type_ == "params")
+        GenerateWavesParamSpectrum();
+    else
+        GenerateWavesSeaStateSpectrum();
       
     //Create textures
     oceanTextures[0] = OpenGLContent::GenerateTexture(GL_TEXTURE_2D, glm::uvec3(params.fftSize, params.fftSize, 0), 
@@ -633,81 +698,85 @@ void OpenGLOcean::DrawParticlesId(OpenGLView* view, GLushort id)
 
 void OpenGLOcean::DrawVelocityField(OpenGLView* view, GLfloat velocityMax)
 {
+    // NEW: Draw glyphs instead of static lines
+    oceanTracers->Draw(view, velocityMax, oceanShaders["vectorfield"]);
+
+    // ORIGINAL STATIC VELOCITY FIELD:
     //1. Compute AABB of the limited viewera frustum
-    glm::vec3 frustum[5];
-    frustum[0] = view->GetEyePosition();
-    glm::mat4 V = view->GetViewMatrix();
-    glm::mat4 invP = glm::inverse(view->GetProjectionMatrix());
-    glm::mat4 invV = glm::inverse(V);
-    glm::vec4 proj[4];
-    proj[0] = invP * glm::vec4(-1.f, -1.f, -1.f, 1.f);
-    proj[1] = invP * glm::vec4(1.f, -1.f, -1.f, 1.f);
-    proj[2] = invP * glm::vec4(1.f, 1.f, -1.f, 1.f);
-    proj[3] = invP * glm::vec4(-1.f, 1.f, -1.f, 1.f);
-    frustum[1] = invV * (proj[0]/proj[0].w);
-    frustum[2] = invV * (proj[1]/proj[1].w);
-    frustum[3] = invV * (proj[2]/proj[2].w);
-    frustum[4] = invV * (proj[3]/proj[3].w);
+    // glm::vec3 frustum[5];
+    // frustum[0] = view->GetEyePosition();
+    // glm::mat4 V = view->GetViewMatrix();
+    // glm::mat4 invP = glm::inverse(view->GetProjectionMatrix());
+    // glm::mat4 invV = glm::inverse(V);
+    // glm::vec4 proj[4];
+    // proj[0] = invP * glm::vec4(-1.f, -1.f, -1.f, 1.f);
+    // proj[1] = invP * glm::vec4(1.f, -1.f, -1.f, 1.f);
+    // proj[2] = invP * glm::vec4(1.f, 1.f, -1.f, 1.f);
+    // proj[3] = invP * glm::vec4(-1.f, 1.f, -1.f, 1.f);
+    // frustum[1] = invV * (proj[0]/proj[0].w);
+    // frustum[2] = invV * (proj[1]/proj[1].w);
+    // frustum[3] = invV * (proj[2]/proj[2].w);
+    // frustum[4] = invV * (proj[3]/proj[3].w);
 
-    GLfloat scaling = 10.f/view->GetNearClip(); //5m of distance
-    frustum[1] = frustum[0] + (frustum[1]-frustum[0])*scaling;
-    frustum[2] = frustum[0] + (frustum[2]-frustum[0])*scaling;
-    frustum[3] = frustum[0] + (frustum[3]-frustum[0])*scaling;
-    frustum[4] = frustum[0] + (frustum[4]-frustum[0])*scaling;
+    // GLfloat scaling = 10.f/view->GetNearClip(); //5m of distance
+    // frustum[1] = frustum[0] + (frustum[1]-frustum[0])*scaling;
+    // frustum[2] = frustum[0] + (frustum[2]-frustum[0])*scaling;
+    // frustum[3] = frustum[0] + (frustum[3]-frustum[0])*scaling;
+    // frustum[4] = frustum[0] + (frustum[4]-frustum[0])*scaling;
 
-    glm::vec3 aabbMin(BT_LARGE_FLOAT);
-    glm::vec3 aabbMax(-BT_LARGE_FLOAT);
+    // glm::vec3 aabbMin(BT_LARGE_FLOAT);
+    // glm::vec3 aabbMax(-BT_LARGE_FLOAT);
 
-    for(unsigned int i=0; i<5; ++i)
-    {
-        if(frustum[i].x < aabbMin.x)
-            aabbMin.x = frustum[i].x;
-        if(frustum[i].x > aabbMax.x)
-            aabbMax.x = frustum[i].x;
-        if(frustum[i].y < aabbMin.y)
-            aabbMin.y = frustum[i].y;
-        if(frustum[i].y > aabbMax.y)
-            aabbMax.y = frustum[i].y;
-        if(frustum[i].z < aabbMin.z)
-            aabbMin.z = frustum[i].z;
-        if(frustum[i].z > aabbMax.z)
-            aabbMax.z = frustum[i].z;
-    }
+    // for(unsigned int i=0; i<5; ++i)
+    // {
+    //     if(frustum[i].x < aabbMin.x)
+    //         aabbMin.x = frustum[i].x;
+    //     if(frustum[i].x > aabbMax.x)
+    //         aabbMax.x = frustum[i].x;
+    //     if(frustum[i].y < aabbMin.y)
+    //         aabbMin.y = frustum[i].y;
+    //     if(frustum[i].y > aabbMax.y)
+    //         aabbMax.y = frustum[i].y;
+    //     if(frustum[i].z < aabbMin.z)
+    //         aabbMin.z = frustum[i].z;
+    //     if(frustum[i].z > aabbMax.z)
+    //         aabbMax.z = frustum[i].z;
+    // }
 
-    if(aabbMax.z < 0.f) return;
-    if(aabbMin.z < 0.f) aabbMin.z = 0.f;
+    // if(aabbMax.z < 0.f) return;
+    // if(aabbMin.z < 0.f) aabbMin.z = 0.f;
 
-    //2. Snap to grid
-    GLfloat gridScale = 0.2f;
-    glm::ivec3 gridMin;
-    glm::ivec3 gridMax;
-    gridMin.x = (GLint)floorf(aabbMin.x/gridScale);
-    gridMin.y = (GLint)floorf(aabbMin.y/gridScale);
-    gridMin.z = (GLint)floorf(aabbMin.z/gridScale);
-    gridMax.x = (GLint)ceilf(aabbMax.x/gridScale);
-    gridMax.y = (GLint)ceilf(aabbMax.y/gridScale);
-    gridMax.z = (GLint)ceilf(aabbMax.z/gridScale);
+    // //2. Snap to grid
+    // GLfloat gridScale = 0.2f;
+    // glm::ivec3 gridMin;
+    // glm::ivec3 gridMax;
+    // gridMin.x = (GLint)floorf(aabbMin.x/gridScale);
+    // gridMin.y = (GLint)floorf(aabbMin.y/gridScale);
+    // gridMin.z = (GLint)floorf(aabbMin.z/gridScale);
+    // gridMax.x = (GLint)ceilf(aabbMax.x/gridScale);
+    // gridMax.y = (GLint)ceilf(aabbMax.y/gridScale);
+    // gridMax.z = (GLint)ceilf(aabbMax.z/gridScale);
 
-    glm::ivec3 gridSize = gridMax - gridMin + 1;
-    GLsizei numPoints = gridSize.x*gridSize.y*gridSize.z;
-    if(numPoints > 1e7) numPoints = 1e7;
+    // glm::ivec3 gridSize = gridMax - gridMin + 1;
+    // GLsizei numPoints = gridSize.x*gridSize.y*gridSize.z;
+    // if(numPoints > 1e7) numPoints = 1e7;
     
-    //3. Generate vertices and render
-    oceanShaders["vectorfield"]->Use();
-    oceanShaders["vectorfield"]->SetUniform("gridOrigin", gridMin);
-    oceanShaders["vectorfield"]->SetUniform("gridSize", gridSize);
-    oceanShaders["vectorfield"]->SetUniform("gridScale", gridScale);
-    oceanShaders["vectorfield"]->SetUniform("vectorSize", 0.2f);
-    oceanShaders["vectorfield"]->SetUniform("velocityMax", velocityMax);
-    oceanShaders["vectorfield"]->SetUniform("VP", view->GetProjectionMatrix() * V);
-    oceanShaders["vectorfield"]->SetUniform("eyePos", frustum[0]);
-    OpenGLState::EnableBlend();
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    ((GraphicalSimulationApp*)SimulationApp::getApp())->getGLPipeline()->getContent()->BindBaseVertexArray();
-    glDrawArrays(GL_POINTS, 0, numPoints);
-    OpenGLState::BindVertexArray(0);
-    OpenGLState::UseProgram(0);
-    OpenGLState::DisableBlend();
+    // //3. Generate vertices and render
+    // oceanShaders["vectorfield"]->Use();
+    // oceanShaders["vectorfield"]->SetUniform("gridOrigin", gridMin);
+    // oceanShaders["vectorfield"]->SetUniform("gridSize", gridSize);
+    // oceanShaders["vectorfield"]->SetUniform("gridScale", gridScale);
+    // oceanShaders["vectorfield"]->SetUniform("vectorSize", 0.2f);
+    // oceanShaders["vectorfield"]->SetUniform("velocityMax", velocityMax);
+    // oceanShaders["vectorfield"]->SetUniform("VP", view->GetProjectionMatrix() * V);
+    // oceanShaders["vectorfield"]->SetUniform("eyePos", frustum[0]);
+    // OpenGLState::EnableBlend();
+    // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    // ((GraphicalSimulationApp*)SimulationApp::getApp())->getGLPipeline()->getContent()->BindBaseVertexArray();
+    // glDrawArrays(GL_POINTS, 0, numPoints);
+    // OpenGLState::BindVertexArray(0);
+    // OpenGLState::UseProgram(0);
+    // OpenGLState::DisableBlend();
 }
 
 void OpenGLOcean::ApplySpecialEffects(OpenGLCamera* cam)
@@ -937,7 +1006,8 @@ float OpenGLOcean::omega(float k)
 }
 
 // 1/kx and 1/ky in meters
-float OpenGLOcean::spectrum(float kx, float ky, bool omnispectrum)
+// NEW: Renamed from Spectrum to SeaStateSpectrum to avoid confusion with ParamSpectrum
+float OpenGLOcean::SeaStateSpectrum(float kx, float ky, bool omnispectrum)
 {
     float U10 = params.wind;
     float Omega = params.omega;
@@ -1000,7 +1070,74 @@ float OpenGLOcean::spectrum(float kx, float ky, bool omnispectrum)
     return params.A * (Bl + Bh) * (1.0 + Delta * cos(2.0 * phi)) / (2.0 * M_PI * sqr(sqr(k))) * tweak; // Eq 67
 }
 
-void OpenGLOcean::GetSpectrumSample(int i, int j, float lengthScale, float kMin, float *result)
+// NEW: generate spectrum based on user parameters instead of sea state
+float OpenGLOcean::ParamSpectrum(float kx, float ky, bool omnispectrum)
+{
+    // cInfo(
+    // "ParamSpectrum called with kx:%f, ky:%f, "
+    // "param A:%f, param cm:%f, param km:%f, "
+    // "param omega:%f, param wind:%f, param dir:%f",
+    // kx, ky,
+    // params.A, params.cm, params.km,
+    // params.omega, params.wind, params.dir);
+
+    float U10 = params.wind;
+    float Omega = params.omega;
+    float Dir = params.dir;
+
+    // phase speed
+    float k = sqrt(kx * kx + ky * ky);
+    float c = omega(k) / k;
+
+    // spectral peak
+    float kp = 9.81 * sqr(Omega / U10); // after Eq 3
+    float cp = omega(kp) / kp;
+
+    // friction velocity
+    float z0 = 3.7e-5 * sqr(U10) / 9.81 * pow(U10 / cp, 0.9f); // Eq 66
+    float u_star = 0.41 * U10 / log(10.0 / z0); // Eq 60
+
+    float Lpm = exp(- 5.0 / 4.0 * sqr(kp / k)); // after Eq 3
+    float gamma = Omega < 1.0 ? 1.7 : 1.7 + 6.0 * log(Omega); // after Eq 3
+    float sigma = 0.08 * (1.0 + 4.0 / pow(Omega, 3.0f)); // after Eq 3
+    float Gamma = exp(-1.0 / (2.0 * sqr(sigma)) * sqr(sqrt(k / kp) - 1.0));
+    float Jp = pow(gamma, Gamma); // Eq 3
+    float Fp = Lpm * Jp * exp(- Omega / sqrt(10.0) * (sqrt(k / kp) - 1.0)); // Eq 32
+    float alphap = 0.006 * sqrt(Omega); // Eq 34
+    float Bl = 0.5 * alphap * cp / c * Fp; // Eq 31
+
+    float alpham = 0.01 * (u_star < params.cm ? 1.0 + log(u_star / params.cm) : 1.0 + 3.0 * log(u_star / params.cm)); // Eq 44
+    float Fm = exp(-0.25 * sqr(k / params.km - 1.0)); // Eq 41
+    float Bh = 0.5 * alpham * params.cm / c * Fm; // Eq 40
+    Bh *= Lpm;
+
+    if (omnispectrum)
+    {
+        return params.A * (Bl + Bh) / (k * sqr(k)); // Eq 30
+    }
+
+    float a0 = log(2.0) / 4.0;
+    float ap = 4.0;
+    float am = 0.13 * u_star / params.cm; // Eq 59
+    float Delta = tanh(a0 + ap * pow(c / cp, 2.5f) + am * pow(params.cm / c, 2.5f)); // Eq 57
+
+    // wave angle relative to the wind heading
+    float phi = atan2(ky, kx) - Dir;
+
+    if(params.propagate)
+    {
+        // keep only the downwind half-plane, rotated to the heading, then double
+        if (kx * cos(Dir) + ky * sin(Dir) < 0.0)
+            return 0.0;
+        Bl *= 2.0;
+        Bh *= 2.0;
+    }
+
+    return params.A * (Bl + Bh) * (1.0 + Delta * cos(2.0 * phi)) / (2.0 * M_PI * sqr(sqr(k))); // Eq 67
+}
+
+// NEW: Renamed from GetSpectrumSample to GetSeaStateSpectrumSample to avoid confusion with the new functions
+void OpenGLOcean::GetSeaStateSpectrumSample(int i, int j, float lengthScale, float kMin, float *result)
 {
     static long seed = 1234;
     float dk = 2.0 * M_PI / lengthScale;
@@ -1013,7 +1150,7 @@ void OpenGLOcean::GetSpectrumSample(int i, int j, float lengthScale, float kMin,
     }
     else
     {
-        float S = spectrum(kx, ky);
+        float S = SeaStateSpectrum(kx, ky);
         float h = sqrtf(S / 2.0) * dk;
         float phi = frandom(&seed) * 2.0 * M_PI;
         result[0] = h * cos(phi);
@@ -1021,9 +1158,33 @@ void OpenGLOcean::GetSpectrumSample(int i, int j, float lengthScale, float kMin,
     }
 }
 
-// generates the waves spectrum
-void OpenGLOcean::GenerateWavesSpectrum()
+// NEW: generate spectrum based on user parameters instead of sea state
+void OpenGLOcean::GetParamSpectrumSample(int i, int j, float lengthScale, float kMin, float *result)
 {
+    static long seed = 1234;
+    float dk = 2.0 * M_PI / lengthScale;
+    float kx = i * dk;
+    float ky = j * dk;
+    if(fabsf(kx) < kMin && fabsf(ky) < kMin)
+    {
+        result[0] = 0.0;
+        result[1] = 0.0;
+    }
+    else
+    {
+        float S = ParamSpectrum(kx, ky);
+        float h = sqrtf(S / 2.0) * dk;
+        float phi = frandom(&seed) * 2.0 * M_PI;
+        result[0] = h * cos(phi);
+        result[1] = h * sin(phi);
+    }
+}
+
+
+// NEW: Renamed from GenerateWavesSpectrum to GenerateWavesSeaStateSpectrum to avoid confusion with the new functions
+void OpenGLOcean::GenerateWavesSeaStateSpectrum()
+{
+    cInfo("Generating ECKV wave Spectrum via Sea State Scalar");
     if(params.spectrum12 != NULL)
     {
         delete[] params.spectrum12;
@@ -1039,10 +1200,37 @@ void OpenGLOcean::GenerateWavesSpectrum()
             int offset = 4 * (x + y * params.fftSize);
             int i = x >= params.fftSize / 2 ? x - params.fftSize : x;
             int j = y >= params.fftSize / 2 ? y - params.fftSize : y;
-            GetSpectrumSample(i, j, params.gridSizes[0], M_PI / params.gridSizes[0], params.spectrum12 + offset);
-            GetSpectrumSample(i, j, params.gridSizes[1], M_PI * params.fftSize / params.gridSizes[0], params.spectrum12 + offset + 2);
-            GetSpectrumSample(i, j, params.gridSizes[2], M_PI * params.fftSize / params.gridSizes[1], params.spectrum34 + offset);
-            GetSpectrumSample(i, j, params.gridSizes[3], M_PI * params.fftSize / params.gridSizes[2], params.spectrum34 + offset + 2);
+            GetSeaStateSpectrumSample(i, j, params.gridSizes[0], M_PI / params.gridSizes[0], params.spectrum12 + offset);
+            GetSeaStateSpectrumSample(i, j, params.gridSizes[1], M_PI * params.fftSize / params.gridSizes[0], params.spectrum12 + offset + 2);
+            GetSeaStateSpectrumSample(i, j, params.gridSizes[2], M_PI * params.fftSize / params.gridSizes[1], params.spectrum34 + offset);
+            GetSeaStateSpectrumSample(i, j, params.gridSizes[3], M_PI * params.fftSize / params.gridSizes[2], params.spectrum34 + offset + 2);
+        }
+    }
+}
+
+// NEW: generate spectrum based on user parameters instead of sea state
+void OpenGLOcean::GenerateWavesParamSpectrum()
+{
+    cInfo("Generating ECKV wave Spectrum via ECKV Parameters");
+    if(params.spectrum12 != NULL)
+    {
+        delete[] params.spectrum12;
+        delete[] params.spectrum34;
+    }
+    params.spectrum12 = new float[params.fftSize * params.fftSize * 4];
+    params.spectrum34 = new float[params.fftSize * params.fftSize * 4];
+
+    for (int y = 0; y < params.fftSize; ++y)
+    {
+        for (int x = 0; x < params.fftSize; ++x)
+        {
+            int offset = 4 * (x + y * params.fftSize);
+            int i = x >= params.fftSize / 2 ? x - params.fftSize : x;
+            int j = y >= params.fftSize / 2 ? y - params.fftSize : y;
+            GetParamSpectrumSample(i, j, params.gridSizes[0], M_PI / params.gridSizes[0], params.spectrum12 + offset);
+            GetParamSpectrumSample(i, j, params.gridSizes[1], M_PI * params.fftSize / params.gridSizes[0], params.spectrum12 + offset + 2);
+            GetParamSpectrumSample(i, j, params.gridSizes[2], M_PI * params.fftSize / params.gridSizes[1], params.spectrum34 + offset);
+            GetParamSpectrumSample(i, j, params.gridSizes[3], M_PI * params.fftSize / params.gridSizes[2], params.spectrum34 + offset + 2);
         }
     }
 }
@@ -1065,7 +1253,13 @@ float OpenGLOcean::ComputeSlopeVariance()
     while (k < 1e3)
     {
         float nextK = k * 1.001;
-        theoreticSlopeVariance += k * k * spectrum(k, 0, true) * (nextK - k);
+
+        // NEW: condition to choose between the two spectrum types, based on user input
+        if (params.type_ == "params")
+            theoreticSlopeVariance += k * k * ParamSpectrum(k, 0, true) * (nextK - k);
+        else if (params.type_ == "sea_state")
+            theoreticSlopeVariance += k * k * SeaStateSpectrum(k, 0, true) * (nextK - k);
+
         k = nextK;
     }
 

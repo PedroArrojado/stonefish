@@ -347,10 +347,27 @@ void Compound::ComputeHydrodynamicForces(HydrodynamicsSettings settings, Ocean* 
                     Transform T_C_part = getOTransform() * parts[i].origin * parts[i].solid->getO2CTransform();
                     Transform T_O_part = getOTransform() * parts[i].origin;
 
-                    ComputeHydrodynamicForcesSubmerged(parts[i].solid->getPhysicsMesh(), ocn, getCGTransform(), T_C_part, v, omega, Fdqp, Tdqp, Fdfp, Tdfp);
-                    Vector3 Cd, Cf;
-                    parts[i].solid->getHydrodynamicCoefficients(Cd, Cf);
-                    CorrectHydrodynamicForces(ocn, Fdqp, Tdqp, Fdfp, Tdfp, Cd, Cf, T_O_part);
+                    //NEW: Dispatch on the PART's physics mode, matching
+                    //     SolidEntity::ComputeHydrodynamicForces(). A FLOATING
+                    //     part uses the asv_wave_sim model, which applies
+                    //     density and its own coefficients internally and must
+                    //     therefore not be followed by the correction pass.
+                    if(parts[i].solid->getPhysicsMode() == PhysicsMode::FLOATING)
+                    {
+                        Vector3 Fbp(0,0,0), Tbp(0,0,0);
+                        Scalar Swetp(0), Vsubp(0);
+                        ComputeHydrodynamicForcesSurfaceWaveSim(settings, parts[i].solid->getPhysicsMesh(), ocn,
+                            getCGTransform(), T_C_part, T_O_part, v, omega,
+                            Fbp, Tbp, Fdqp, Tdqp, Fdfp, Tdfp, Swetp, Vsubp, submerged,
+                            parts[i].solid->getSurfaceDragParams(), parts[i].solid->getVolume());
+                    }
+                    else
+                    {
+                        ComputeHydrodynamicForcesSubmerged(parts[i].solid->getPhysicsMesh(), ocn, getCGTransform(), T_C_part, v, omega, Fdqp, Tdqp, Fdfp, Tdfp);
+                        Vector3 Cd, Cf;
+                        parts[i].solid->getHydrodynamicCoefficients(Cd, Cf);
+                        CorrectHydrodynamicForces(ocn, Fdqp, Tdqp, Fdfp, Tdfp, Cd, Cf, T_O_part);
+                    }
                     Fdq += Fdqp;
                     Tdq += Tdqp;
                     Fdf += Fdfp;
@@ -410,10 +427,21 @@ void Compound::ComputeHydrodynamicForces(HydrodynamicsSettings settings, Ocean* 
 
                 if(parts[i].isExternal) //Compute buoyancy and drag
                 {
-                    ComputeHydrodynamicForcesSurface(pSettings, parts[i].solid->getPhysicsMesh(), ocn, getCGTransform(), T_C_part, v, omega, Fbp, Tbp, Fdqp, Tdqp, Fdfp, Tdfp, Swetp, Vsubp, submerged);
-                    Vector3 Cd, Cf;
-                    parts[i].solid->getHydrodynamicCoefficients(Cd, Cf);
-                    CorrectHydrodynamicForces(ocn, Fdqp, Tdqp, Fdfp, Tdfp, Cd, Cf, T_O_part);
+                    //NEW: Per-part dispatch; see the submerged branch above.
+                    if(parts[i].solid->getPhysicsMode() == PhysicsMode::FLOATING)
+                    {
+                        ComputeHydrodynamicForcesSurfaceWaveSim(pSettings, parts[i].solid->getPhysicsMesh(), ocn,
+                            getCGTransform(), T_C_part, T_O_part, v, omega,
+                            Fbp, Tbp, Fdqp, Tdqp, Fdfp, Tdfp, Swetp, Vsubp, submerged,
+                            parts[i].solid->getSurfaceDragParams(), parts[i].solid->getVolume());
+                    }
+                    else
+                    {
+                        ComputeHydrodynamicForcesSurface(pSettings, parts[i].solid->getPhysicsMesh(), ocn, getCGTransform(), T_C_part, v, omega, Fbp, Tbp, Fdqp, Tdqp, Fdfp, Tdfp, Swetp, Vsubp, submerged);
+                        Vector3 Cd, Cf;
+                        parts[i].solid->getHydrodynamicCoefficients(Cd, Cf);
+                        CorrectHydrodynamicForces(ocn, Fdqp, Tdqp, Fdfp, Tdfp, Cd, Cf, T_O_part);
+                    }
                     Fb += Fbp;
                     Tb += Tbp;
                     Fdq += Fdqp;

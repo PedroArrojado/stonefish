@@ -27,6 +27,8 @@
 
 #include "StonefishCommon.h"
 #include "graphics/OpenGLContent.h"
+#include "entities/forcefields/TurbulenceMixer.h"
+#include "entities/forcefields/GustMixer.h"
 
 namespace sf
 {
@@ -61,6 +63,16 @@ namespace sf
 
         //! A method returning the type of the velocity field.
         virtual VelocityFieldType getType() const = 0;
+
+        //! NEW: A method updating the velocity field.
+        /*!
+         \param dt time step [s]
+        */
+        void Update(GLfloat dt);
+
+    protected:
+        //NEW: Variable to keep track of the current time for the velocity field.
+        GLfloat current_time;
 
     private:
         bool enabled;

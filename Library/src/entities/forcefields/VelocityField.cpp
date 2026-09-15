@@ -46,4 +46,9 @@ bool VelocityField::isEnabled() const
     return enabled;
 }
 
+void VelocityField::Update(GLfloat dt)
+{
+    current_time += dt;
+}
+
 }

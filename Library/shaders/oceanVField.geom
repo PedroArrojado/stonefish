@@ -26,8 +26,17 @@ uniform mat4 VP;
 uniform float vectorSize;
 uniform float velocityMax;
 uniform vec3 eyePos;
+uniform sampler3D fieldTex;
+uniform vec3 fieldBoxMin;
+uniform vec3 fieldBoxSize;
 
-#inject "velocityField.glsl"
+vec3 sampleFieldTex(vec3 p)
+{
+    vec3 tc = (p - fieldBoxMin) / fieldBoxSize;   //world -> [0,1] texcoord
+    return texture(fieldTex, tc).xyz;             //trilinear; .w holds |v| if you want it
+}
+
+#inject "oceanVelocityField.glsl"
 
 out GS_OUT
 {
@@ -51,49 +60,14 @@ vec3 colormap(float value, float limit)
 
 void main()
 {
-    //Calculate velocity at point
     vec3 p = gl_in[0].gl_Position.xyz;
-    p.x += rand(vec2(p.x, p.y))*0.5;
-    p.y += rand(vec2(p.y*p.x, p.z))*0.5;
-    p.z += rand(vec2(p.z, p.x))*0.5;
 
     float d = length(eyePos - p);
     if(d > 10.0)
         return;
 
-    vec3 velocity = vec3(0.0);
-    
-    for(uint i=0; i<numCurrents; ++i)
-    {
-        switch(currents[i].type)
-        {
-            case 0: //Uniform
-                velocity += currents[i].dirV.xyz * currents[i].dirV.w;
-                break;
+    vec3 velocity = sampleFieldTex(p);
 
-            case 1: //Jet
-                velocity += jet(p, currents[i].posR.xyz, currents[i].posR.w, 
-                                   currents[i].dirV.xyz, currents[i].dirV.w);
-                break;
-
-            case 2: //Pipe
-                velocity += pipe(p, currents[i].posR.xyz, currents[i].posR.w,
-                                    currents[i].params.y, currents[i].params.x,
-                                    currents[i].dirV.xyz, currents[i].dirV.w,
-                                    currents[i].params.z);
-                break;
-
-            /*case 10: //Thruster
-                velocity += thruster(p, currents[i].posR.xyz, currents[i].posR.w, 
-                                        currents[i].dirV.xyz, currents[i].dirV.w);
-                break;*/
-                
-            default:
-                break;
-        }
-    }
-
-    //Generate vector
     float vmag = length(velocity);
     if(vmag > 0.01)
     {

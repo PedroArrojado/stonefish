@@ -56,7 +56,7 @@ Mesh* LoadOBJ(const std::string& path, GLfloat scale)
     cInfo("Loading geometry from: %s", path.c_str());
     
     int64_t start = GetTimeInMicroseconds();
-    rapidobj::Result objData = rapidobj::ParseFile(path);
+    rapidobj::Result objData = rapidobj::ParseFile(path, rapidobj::MaterialLibrary::Default(rapidobj::Load::Optional)); // NEW: Doesnt crash if does not find .mtl file
     
     if (objData.error)
     {

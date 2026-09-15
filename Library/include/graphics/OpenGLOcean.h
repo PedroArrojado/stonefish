@@ -26,9 +26,11 @@
 #ifndef __Stonefish_OpenGLOcean__
 #define __Stonefish_OpenGLOcean__
 
+#include "graphics/OpenGLCurrentTracers.h"
 #include "graphics/OpenGLContent.h"
 #include <SDL2/SDL_mutex.h>
 #include <map>
+#include <random>
 
 namespace sf
 {
@@ -42,8 +44,10 @@ namespace sf
         float* spectrum12;
         float* spectrum34;
         bool propagate; //wave propagation
+        std::string type_; // NEW: Construcotr type
         float wind; //wind speed in meters per second (at 10m above surface)
         float omega; //sea state (inverse wave age)
+        float dir; // NEW: wind direction in radians
         float A; //wave amplitude
         float km;
         float cm;
@@ -65,6 +69,7 @@ namespace sf
     class OpenGLCamera;
 	class OpenGLOceanParticles;
     class VelocityField;
+    class Ocean;
 	
     //! A class implementing ocean simulation in OpenGL.
     class OpenGLOcean
@@ -205,6 +210,9 @@ namespace sf
         //! A method returning informing if the particles are enabled.
         bool getParticlesEnabled();
 
+        //! A method to remove particles from a view.
+        void RemoveParticles(OpenGLView* view);
+
         //! A method to get wave height at a specified coordinate.
         /*!
          \param x the x coordinate in world frame [m]
@@ -212,6 +220,13 @@ namespace sf
          \return wave height [m]
          */
         virtual GLfloat ComputeWaveHeight(GLfloat x, GLfloat y);
+
+        //! NEW: A method to get wave height at a batch of coordinates.
+        /*!
+         \param pts a vector of points in world frame [m]
+         \return a vector of wave heights [m]
+         */
+        virtual std::vector<float> ComputeWaveHeightMap(const std::vector<glm::vec3>& pts);
 
         //! A method returning the id of the wave texture.
         GLuint getWaveTexture();
@@ -224,6 +239,15 @@ namespace sf
         	
         //! A method calculating Henyey-Greenstein scattering factor.
         glm::vec3 getLightScattering();
+
+        //! NEW: A method returning the map of ocean particles.
+        const std::map<OpenGLView*, std::shared_ptr<OpenGLOceanParticles>> & getOceanParticles() const { return oceanParticles; }
+        
+        //! NEW: A method to clear particles from all views.
+        void clearParticleMap() { oceanParticles.clear(); }
+        
+        //! NEW: A method to update the positions/velocities of current glyph particles.
+        void UpdateOceanParticles(OpenGLView* view, GLfloat dt, sf::Ocean* ocn);
         
     protected:
         virtual void InitializeSimulation();
@@ -243,6 +267,8 @@ namespace sf
         GLuint oceanFBOs[3];
         GLuint oceanTextures[6];
         GLuint oceanCurrentsUBO;
+
+        OpenGLCurrentTracers* oceanTracers; //NEW: Velocity field glyphs
         
     private:
         GLfloat* ComputeButterflyLookupTable(unsigned int size, unsigned int passes);
@@ -250,9 +276,17 @@ namespace sf
         void computeWeight(int N, int k, float &Wr, float &Wi);
         float ComputeSlopeVariance();
         float GetSlopeVariance(float kx, float ky, float *spectrumSample);
-        void GenerateWavesSpectrum();
-        void GetSpectrumSample(int i, int j, float lengthScale, float kMin, float *result);
-        float spectrum(float kx, float ky, bool omnispectrum = false);
+
+        // NEW: (Renamed) Generate the wave spectrum for a given wave state (simplified, less control over the spectrum)-Original implementation
+        void GenerateWavesSeaStateSpectrum();
+        void GetSeaStateSpectrumSample(int i, int j, float lengthScale, float kMin, float *result);
+        float SeaStateSpectrum(float kx, float ky, bool omnispectrum = false);
+
+        // NEW: Generate the wave spectrum for a given wave params (more control over the spectrum)
+        float ParamSpectrum(float kx, float ky, bool omnispectrum = false);
+        void GenerateWavesParamSpectrum();
+        void GetParamSpectrumSample(int i, int j, float lengthScale, float kMin, float *result);
+        
         float omega(float k);
 
         int oceanBoxObj;

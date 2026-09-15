@@ -78,9 +78,8 @@ namespace sf
         //! A method used to get the pointer to the associated simulation manager.
         SimulationManager* getSimulationManager();
 
-    protected:
-        Console log;
-
+        // NEW: Made access to parser methods public for dynamic spawning:
+        
         //! A method used to pre-process the xml description file after loading.
         /*!
          \param root a pointer to a root node
@@ -289,6 +288,9 @@ namespace sf
 
         //! A method informing if the simulation is working in graphical mode.
         bool isGraphicalSim();
+
+    protected:
+        Console log;
 
     private:
         bool CopyNode(XMLNode* destParent, const XMLNode* src);

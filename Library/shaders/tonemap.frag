@@ -24,6 +24,9 @@ layout(location = 0) out vec4 fragColor;
 uniform sampler2D texSource;
 uniform sampler2D texExposure;
 uniform float exposureComp;
+uniform sampler2D texLinearDepth;
+uniform vec3 fogColor;
+uniform float fogDensity;
 
 #define RGB_TO_LUM vec3(0.2125, 0.7154, 0.0721)
 
@@ -195,4 +198,8 @@ void main(void)
     color = hsvToRgb(hsv);
     //Final output
     fragColor = vec4(color, lum);
+
+    float dist = texture(texLinearDepth, texcoord).r;   // linear eye-space distance [m]
+    float f = 1.0 - exp(-fogDensity * dist);
+    fragColor.rgb = mix(fragColor.rgb, fogColor, f);
 }

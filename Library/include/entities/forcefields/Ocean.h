@@ -29,6 +29,8 @@
 #include "core/MaterialManager.h"
 #include "entities/ForcefieldEntity.h"
 #include "graphics/OpenGLOcean.h"
+#include <atomic>
+#include <mutex>
 
 namespace sf
 {
@@ -48,11 +50,17 @@ namespace sf
     public:
         //! A constructor.
         /*!
-         \param uniqueName a name for the ocean
-         \param waves the state of the ocean (waves enabled when >0)
-         \param l a pointer to the liquid that is filling the ocean (normally water)
+         \param uniqueName  a name for the ocean
+         \param waves       the state of the ocean (waves enabled when >0)
+         \param l           a pointer to the liquid that is filling the ocean (normally water)
+         \param oceanType   NEW: a string defining ocean construction type, either "sea_state" for legacy sea state, or "params" for new parameters.
+         \param windSpeed   NEW: the speed of the wind [m/s] U10 in ECKV see paper
+         \param direction   NEW: the direction of the wind [rad] (half plane mask direction) see paper
+         \param age         NEW: the inverse age of the ocean [s] \Omega in ECKV [0.84,5.0] see paper
          */
-        Ocean(std::string uniqueName, Scalar waves, Fluid l);
+        Ocean(std::string uniqueName, Scalar waves, Fluid l, 
+            std::string oceanType,
+            Scalar windSpeed, Scalar direction, Scalar age);
         
         //! A destructor.
         ~Ocean();
@@ -91,6 +99,14 @@ namespace sf
          \return is the point inside fluid?
          */
         bool IsInsideFluid(const Vector3& point);
+
+        //! NEW: A method checking if a batch of points is inside fluid
+        /*!
+         \param point the positions of points to be checked [m]
+         \return are the points inside fluid?
+         */
+        std::vector<char> IsInsideFluidMap(const std::vector<Vector3>& points);
+
         
         //! A method returning the hydrostatic pressure of the fluid at the specified point.
         /*!
@@ -106,6 +122,15 @@ namespace sf
          */
         Scalar GetDepth(const Vector3& point);
         GLfloat GetDepth(const glm::vec3& point);
+
+        //! NEW: A method returning the depth of the ocean at a batch of specified points 
+        //! (to avoid lock/unlock with update ocean data implementation).
+        /*!
+         \param points the positions of the measurement points [m]
+         \return the distance from the points to the surface of fluid [m]
+         */
+        std::vector<float> GetDepthMap(const std::vector<glm::vec3>& points);
+
         
         //! A method to enable all defined currents.
         void EnableCurrents();
@@ -115,6 +140,17 @@ namespace sf
 
         //! A method updating the currents data in the OpenGL ocean.
         void UpdateCurrentsData();
+
+        //! NEW: A method updating the currents data in the OpenGL ocean. Ocean Updates are applied in the next render call.
+        /*!
+         \param windSpeed   NEW: the speed of the wind [m/s] U10 in ECKV see paper
+         \param direction   NEW: the direction of the wind [rad] (half plane mask direction) see paper
+         \param age         NEW: the inverse age of the ocean [s] \Omega in ECKV [0.84,5.0] see paper
+        */
+        bool UpdateOceanData(Scalar windSpeed, Scalar direction, Scalar age);
+
+        //! NEW: A method applying the pending ocean update in the next render call.
+        void ApplyPendingOceanUpdate();
         
         //! A method used to setup the properties of the water.
         /*!
@@ -147,6 +183,9 @@ namespace sf
          */
         VelocityField* getVelocityField(size_t index);
 
+        //! NEW: A method returning a pointer to all velocity fields.
+        std::vector<VelocityField*> getVelocityFields();
+
         //! A method returning the type of the force field.
         ForcefieldType getForcefieldType();
         
@@ -171,7 +210,18 @@ namespace sf
         Scalar waterType;
         Scalar salinity;
         Scalar oceanState;
+        
+        // NEW: Ocean type and parameters
+        std::string oceanType_;
+        Scalar eckvWindSpeed;
+        Scalar eckvDirection;
+        Scalar eckvAge;
+
         bool currentsEnabled;
         Renderable wavesDebug;
+
+        // NEW: Mutex for thread safety when updating ocean data
+        std::atomic<bool> pendingOceanUpdate_{false};
+        SDL_mutex* hydroMutex_{nullptr};
     };
 }

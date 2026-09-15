@@ -126,9 +126,26 @@ void FeatherstoneEntity::AddToSimulation(SimulationManager* sm, const Transform&
     sm->getDynamicsWorld()->addMultiBody(multiBody);
 }
 
+// NEW: Method to remove the multibody from the simulation (colliders were preservering need to check)
 void FeatherstoneEntity::RemoveFromSimulation(SimulationManager* sm)
 {
-    sm->getDynamicsWorld()->removeMultiBody(multiBody);
+    btMultiBodyDynamicsWorld* world = sm->getDynamicsWorld();
+
+    // Remove per-link colliders that BuildMultibodyLinkCollider added via addCollisionObject.
+    if(multiBody->getBaseCollider() != nullptr)
+        world->removeCollisionObject(multiBody->getBaseCollider());
+    for(int i = 0; i < multiBody->getNumLinks(); ++i)
+        if(multiBody->getLink(i).m_collider != nullptr)
+            world->removeCollisionObject(multiBody->getLink(i).m_collider);
+
+    // Remove joint limit / motor constraints that AddToSimulation added.
+    for(size_t i = 0; i < joints.size(); ++i)
+    {
+        if(joints[i].limit != nullptr) world->removeMultiBodyConstraint(joints[i].limit);
+        if(joints[i].motor != nullptr) world->removeMultiBodyConstraint(joints[i].motor);
+    }
+
+    world->removeMultiBody(multiBody);
 }
 
 void FeatherstoneEntity::Respawn(const Transform& origin)

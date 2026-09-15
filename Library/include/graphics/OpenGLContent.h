@@ -243,11 +243,15 @@ namespace sf
          */
         void AddView(OpenGLView* view);
         
+        //!TODO: View removal method (for dynamic spawn/despawn of robots w/cameras)
+
         //! A method to add light to the list of lights.
         /*!
          \param light a pointer to a light object
          */
         void AddLight(OpenGLLight* light);
+
+        //!TODO: Light removal method (for dynamic spawn/despawn of robots w/lights)
         
         //! A method to build a graphical object from a mesh structure.
         /*!
