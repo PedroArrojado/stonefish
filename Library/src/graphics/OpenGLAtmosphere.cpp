@@ -278,7 +278,7 @@ void OpenGLAtmosphere::Simulate(GLfloat dt)
 
 void OpenGLAtmosphere::UpdateAirParticles(OpenGLView* view, GLfloat dt, Atmosphere* atm)
 {
-    const int N = 32;
+    const int N = 16;
     glm::vec3 eye = view->GetEyePosition();
     glm::vec3 boxMin = eye - glm::vec3(10.f);
     glm::vec3 boxSize = glm::vec3(20.f);

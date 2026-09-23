@@ -48,25 +48,55 @@ Odometry::Odometry(std::string uniqueName, Scalar frequency, int historyLength) 
     channels.push_back(SensorChannel("Angular velocity Z", QuantityType::ANGULAR_VELOCITY));
     ornStdDev = Scalar(0);
     ornNoise = std::normal_distribution<Scalar>(Scalar(0), ornStdDev);
+    convention = "NED";
 }
 
 void Odometry::InternalUpdate(Scalar dt)
 {
-    //Calculate transformation from global to imu frame
+    // Transformation from global to odometry frame
     Transform odomTrans = getSensorFrame();
-    
+    Matrix3 basis = odomTrans.getBasis();
+    Matrix3 basis_inv = basis.inverse();
+
     Vector3 pos = odomTrans.getOrigin();
-    Vector3 v = odomTrans.getBasis().inverse() * attach->getLinearVelocityInLocalPoint(odomTrans.getOrigin() - attach->getCGTransform().getOrigin());
-    
-    Quaternion orn = odomTrans.getRotation();
+    Vector3 v = basis_inv * attach->getLinearVelocityInLocalPoint(
+        odomTrans.getOrigin() - attach->getCGTransform().getOrigin());
+    Vector3 av = basis_inv * attach->getAngularVelocity();
+
+    // Orientation: pre-multiply by R_x(π) to strip out the static 180°
+    // X rotation baked in by the URDF world_transform. The result is the
+    // body's pose expressed in a NWU/FLU world (level upright -> identity).
+    Matrix3 orient_basis = basis;
+    if (this->convention == "FLU") {
+        Matrix3 R_x_pi;
+        R_x_pi.setEulerYPR(0, 0, M_PI);   // yaw=0, pitch=0, roll=π
+        orient_basis = R_x_pi * basis;    // PRE-multiply, matches IMU
+    }
+
+    Quaternion orn;
+    orient_basis.getRotation(orn);
+
+    // Apply orientation noise (axis-angle perturbation, as before)
     Scalar angle = orn.getAngle() + ornNoise(randomGenerator);
     orn = Quaternion(orn.getAxis(), angle);
 
-    Vector3 av = odomTrans.getBasis().inverse() * attach->getAngularVelocity();
-    
-    //Record sample
-    Sample s{std::vector<Scalar>({pos.x(), pos.y(), pos.z(), v.x(), v.y(), v.z(), orn.x(), orn.y(), orn.z(), orn.w(), av.x(), av.y(), av.z()})};
-    AddSampleToHistory(s);
+    // Record sample
+    if (this->convention == "FLU")
+    {
+        Sample s{std::vector<Scalar>({pos.x(), -pos.y(), -pos.z(),
+                                  v.x(), -v.y(), -v.z(),
+                                  orn.x(), orn.y(), orn.z(), orn.w(),
+                                  av.x(), -av.y(), -av.z()})};
+        AddSampleToHistory(s);
+    }
+    else
+    {
+        Sample s{std::vector<Scalar>({pos.x(), pos.y(), pos.z(),
+                                  v.x(), v.y(), v.z(),
+                                  orn.x(), orn.y(), orn.z(), orn.w(),
+                                  av.x(), av.y(), av.z()})};
+        AddSampleToHistory(s);
+    }
 }
    
 void Odometry::setNoise(Scalar positionStdDev, Scalar velocityStdDev, Scalar angleStdDev, Scalar angularVelocityStdDev)

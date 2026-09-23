@@ -4196,6 +4196,10 @@ Sensor* ScenarioParser::ParseSensor(XMLElement* element, const std::string& name
             history = -1;
             
         IMU* imu = new IMU(sensorName, rate, history);
+
+        const char* convention;
+        if(element->QueryStringAttribute("convention", &convention) == XML_SUCCESS)
+            imu->convention=convention;
         
         //Optional range definition
         if((item = element->FirstChildElement("range")) != nullptr)    
@@ -4550,6 +4554,9 @@ Sensor* ScenarioParser::ParseSensor(XMLElement* element, const std::string& name
             history = -1;
             
         Odometry* odom = new Odometry(sensorName, rate, history);
+        const char* convention;
+        if(element->QueryStringAttribute("convention", &convention) == XML_SUCCESS)
+            odom->convention=convention;
         
         //Optional noise definition
         if((item = element->FirstChildElement("noise")) != nullptr)    

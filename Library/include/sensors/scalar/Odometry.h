@@ -60,6 +60,7 @@ namespace sf
         //! A method returning the type of the scalar sensor.
         ScalarSensorType getScalarSensorType() const override;
 
+        std::string convention;
     private:
         //Custom noise generation
         Scalar ornStdDev;
