@@ -52,49 +52,39 @@ IMU::IMU(std::string uniqueName, Scalar frequency, int historyLength) : LinkSens
 
 void IMU::InternalUpdate(Scalar dt)
 {
+    //get sensor frame in world
     Transform imuTrans = getSensorFrame();
-    Matrix3 basis = imuTrans.getBasis();
-    Matrix3 basis_inv = basis.inverse();
-
-    // Vectors: already in the IMU's local frame, which is FLU-aligned
-    // because of the world_transform rpy="π 0 0". No conversion needed.
-    Vector3 av = basis_inv * attach->getAngularVelocity();
-
-    Vector3 R = imuTrans.getOrigin() - attach->getCGTransform().getOrigin();
-    Vector3 la = basis_inv * (
-          attach->getLinearAcceleration()
-        + attach->getAngularAcceleration().cross(R)
-        + attach->getAngularVelocity().cross(attach->getAngularVelocity().cross(R))
-        - SimulationApp::getApp()->getSimulationManager()->getGravity()
-    );
-
-    // Orientation: pre-multiply by R_x(π) to strip out the static 180°
-    // X rotation baked in by the URDF world_transform. The result is the
-    // body's pose expressed in a NWU/FLU world (level upright -> identity).
-    Matrix3 orient_basis = basis;
-    if (this->convention == "FLU") {
-        Matrix3 R_x_pi;
-        R_x_pi.setEulerYPR(0, 0, M_PI);   // yaw=0, pitch=0, roll=π
-        orient_basis = R_x_pi * basis;    // PRE-multiply, not post
-    }
-
+    
+    //get angular velocity
+    Vector3 av = imuTrans.getBasis().inverse() * attach->getAngularVelocity();
+    
+    //get angles
     Scalar yaw, pitch, roll;
-    orient_basis.getEulerYPR(yaw, pitch, roll);
-
+    imuTrans.getBasis().getEulerYPR(yaw, pitch, roll);
+    
+    //accumulate and add drift
     accumulatedYawDrift += yawDriftRate * dt;
     yaw += accumulatedYawDrift;
 
-    if (this->convention == "FLU")
+    //get acceleration
+    Vector3 R = imuTrans.getOrigin() - attach->getCGTransform().getOrigin();
+    Vector3 la = imuTrans.getBasis().inverse() * (
+                   attach->getLinearAcceleration() 
+                   + attach->getAngularAcceleration().cross(R)
+                   + attach->getAngularVelocity().cross(attach->getAngularVelocity().cross(R))
+                   - SimulationApp::getApp()->getSimulationManager()->getGravity() // Negative to get readings like in actual sensor
+                );
+    
+    //NED/FRD convention stays as is:
+    if(convention=="ENU") 
     {
-        Sample s{std::vector<Scalar>({roll, -pitch, yaw,
-                                   av.x(), av.y(), av.z(),
-                                   la.x(), la.y(), la.z()})};
+        Sample s{std::vector<Scalar>({roll-M_PI, -pitch, M_PI/2 - yaw, av.x(), av.y(), av.z(), la.x(), la.y(), la.z()})};
+        // x is rotated by 180 degrees, while z is rotated by 90 degrees. 
         AddSampleToHistory(s);
     }
-    else{
-        Sample s{std::vector<Scalar>({roll, -pitch, yaw,
-                                   av.x(), av.y(), av.z(),
-                                   la.x(), la.y(), la.z()})};
+    else
+    {
+        Sample s{std::vector<Scalar>({roll, pitch, yaw, av.x(), av.y(), av.z(), la.x(), la.y(), la.z()})};
         AddSampleToHistory(s);
     }
 }
